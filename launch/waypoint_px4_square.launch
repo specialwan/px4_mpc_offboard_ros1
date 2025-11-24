@@ -1,0 +1,27 @@
+<launch>
+  <!-- Waypoint Publisher untuk PX4 internal PID (trajectory square) -->
+  <node pkg="mpc_offboard"
+        type="waypoint_publisher_px4.py"
+        name="waypoint_publisher_px4"
+        output="screen">
+
+    <!-- Pilih mode trajectory -->
+    <param name="waypoint_mode" value="square"/>
+
+    <!-- Parameter square (NED frame) -->
+    <!-- center_n / center_e = pusat persegi dalam meter relatif home -->
+    <param name="square_center_n"         value="0.0"/>
+    <param name="square_center_e"         value="0.0"/>
+    <param name="square_size"             value="20.0"/>   <!-- sisi 20 m -->
+    <param name="square_altitude"         value="-5.0"/>   <!-- 5 m di atas ground -->
+    <param name="square_points_per_side"  value="5"/>      <!-- titik antar-corner -->
+    <param name="square_constant_yaw"     value="false"/>  <!-- true kalau mau yaw tetap 0 -->
+
+    <!-- Mode tracking -->
+    <param name="continuous_mode"   value="true"/>   <!-- smooth, tidak stop di setiap WP -->
+    <param name="acceptance_radius" value="0.8"/>    <!-- dipakai kalau continuous_mode=false -->
+    <param name="lookahead_distance" value="2.0"/>   <!-- jarak sebelum advance ke WP berikut -->
+    <param name="loop_mission"      value="false"/>  <!-- true kalau mau muter terus -->
+
+  </node>
+</launch>
