@@ -60,17 +60,17 @@ class MPCPositionController:
 
         self.C = np.eye(self.nx)
 
-        # Cost matrices
+        # Cost matrices - SAFE MODE FOR REAL FLIGHT
         self.Q = np.diag([
-            8.0, 8.0, 100.0,   # posisi
-            10.0, 10.0, 80.0   # kecepatan
+            18.0, 18.0, 140.0,   # posisi (presisi sedang)
+            12.0, 12.0, 90.0     # kecepatan (smooth tracking)
         ])
 
-        self.R = np.diag([0.02, 0.02, 0.02])
-        self.R_delta = np.diag([0.1, 0.1, 0.1])
+        self.R = np.diag([0.025, 0.025, 0.025])  # control effort (lebih conservative)
+        self.R_delta = np.diag([0.15, 0.15, 0.15])  # rate penalty (hindari perubahan cepat)
 
         self.u_prev = np.zeros(self.nu)
-        self.a_max = 4.0  # m/s^2
+        self.a_max = 3.5  # m/s^2 (↓ untuk safety)
 
         self._build_prediction_matrices()
 
@@ -363,11 +363,44 @@ class MPCWaypointFollowerROS1:
         if not self.offboard_mode:
             return
 
+        # =====================================================================
+        # COMPUTE TARGET VELOCITY (SMOOTH TRAJECTORY)
+        # =====================================================================
         if not self.waypoint_received:
+            # No waypoint: hover at default position
             self.target_position[0] = self.current_position[0]
             self.target_position[1] = self.current_position[1]
             self.target_position[2] = -5.0
             self.target_velocity[:] = 0.0
+        else:
+            # Waypoint active: compute smooth velocity reference
+            direction = self.target_position - self.current_position
+            distance = np.linalg.norm(direction)
+            
+            if distance > 0.1:  # Still far from target
+                # Normalized direction vector
+                direction_norm = direction / distance
+                
+                # Speed profile: SAFE MODE - conservative speeds
+                max_speed = 1.8  # m/s (↓ SAFE for real drone)
+                lookahead = 4.0  # m (↑ smooth deceleration zone)
+                
+                # Linear speed reduction as approaching target
+                speed_factor = min(distance / lookahead, 1.0)
+                desired_speed = max_speed * speed_factor
+                
+                # Target velocity vector
+                self.target_velocity = direction_norm * desired_speed
+                
+                rospy.loginfo_throttle(
+                    2.0,
+                    f"🎯 Target vel: [{self.target_velocity[0]:.2f}, "
+                    f"{self.target_velocity[1]:.2f}, {self.target_velocity[2]:.2f}] m/s | "
+                    f"Distance: {distance:.2f}m | Speed: {desired_speed:.2f} m/s"
+                )
+            else:
+                # Close to target: slow down to zero
+                self.target_velocity[:] = 0.0
 
         x = np.concatenate([self.current_position, self.current_velocity])
         x_ref = np.concatenate([self.target_position, self.target_velocity])
@@ -385,13 +418,18 @@ class MPCWaypointFollowerROS1:
         self.attitude_thrust = thrust
         self.attitude_R_matrix = R
 
-        z_err = self.target_position[2] - self.current_position[2]
-        rospy.loginfo(
-            f"🎯 MPC OUTPUT:\n"
-            f"   Position: Z={self.current_position[2]:.2f}m → Target={self.target_position[2]:.2f}m (error={z_err:.2f}m)\n"
-            f"   Velocity: vz={self.current_velocity[2]:.2f} m/s\n"
-            f"   Acceleration: az={acc[2]:.3f} m/s² ({'CLIMB' if acc[2] < 0 else 'DESCEND/HOVER'})\n"
-            f"   Thrust: {thrust:.3f}"
+        # Enhanced logging with velocity reference
+        pos_err = np.linalg.norm(self.target_position - self.current_position)
+        vel_err = np.linalg.norm(self.target_velocity - self.current_velocity)
+        
+        rospy.loginfo_throttle(
+            1.0,
+            f"🎯 MPC STATE:\n"
+            f"   Pos: [{self.current_position[0]:.1f}, {self.current_position[1]:.1f}, {self.current_position[2]:.1f}] → "
+            f"[{self.target_position[0]:.1f}, {self.target_position[1]:.1f}, {self.target_position[2]:.1f}] | Err: {pos_err:.2f}m\n"
+            f"   Vel: [{self.current_velocity[0]:.2f}, {self.current_velocity[1]:.2f}, {self.current_velocity[2]:.2f}] → "
+            f"[{self.target_velocity[0]:.2f}, {self.target_velocity[1]:.2f}, {self.target_velocity[2]:.2f}] m/s | Err: {vel_err:.2f}\n"
+            f"   Acc: [{acc[0]:.2f}, {acc[1]:.2f}, {acc[2]:.2f}] m/s² | Thrust: {thrust:.3f}"
         )
 
     # ===================== Attitude setpoint =====================
