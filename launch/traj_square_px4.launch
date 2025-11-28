@@ -1,0 +1,10 @@
+<launch>
+  <node pkg="mpc_offboard" type="px4_trajectory_publisher_mavros.py"
+        name="px4_trajectory_publisher_mavros" output="screen">
+    <param name="waypoint_mode" value="square"/>
+    <param name="square_size" value="20.0"/>
+    <param name="ref_speed" value="2.0"/>
+    <param name="start_at_current_pose" value="true"/>
+    <param name="loop_trajectory" value="false"/>
+  </node>
+</launch>

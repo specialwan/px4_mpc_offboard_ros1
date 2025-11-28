@@ -1,0 +1,9 @@
+<launch>
+  <node pkg="mpc_offboard" type="trajectory_publisher_mavros_start_at_uav.py"
+        name="trajectory_publisher_mavros_traj" output="screen">
+    <param name="waypoint_mode" value="square"/>
+    <param name="square_size" value="20.0"/>
+    <param name="ref_speed" value="2.0"/>
+    <param name="start_at_current_pose" value="true"/>
+  </node>
+</launch>
