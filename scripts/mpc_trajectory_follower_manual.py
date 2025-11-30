@@ -2,6 +2,7 @@
 ############################################################################
 #
 #   MPC Trajectory Tracking Controller (MAVROS Version, ROS1)
+#   VARIAN MANUAL-OFFBOARD:
 #
 #   - ROS1 + mavros
 #   - MPC 6-state: [x, y, z, vx, vy, vz]
@@ -11,6 +12,11 @@
 #   - Output: acceleration [ax, ay, az] (NED)
 #   - Dikonversi ke Attitude + Thrust → /mavros/setpoint_raw/attitude
 #
+#   PERBEDAAN UTAMA:
+#   - TIDAK ada pemanggilan service ARM / OFFBOARD dari kode ini.
+#   - Pilot harus set mode OFFBOARD + ARM manual (QGC / RC).
+#   - Node hanya mengontrol bila mode=OFFBOARD dan armed=True.
+#
 ############################################################################
 
 import rospy
@@ -19,7 +25,6 @@ import quadprog  # pastikan sudah: pip3 install quadprog
 
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from mavros_msgs.msg import State, AttitudeTarget
-from mavros_msgs.srv import CommandBool, SetMode
 
 
 class MPCPositionController:
@@ -214,20 +219,23 @@ def quaternion_to_euler(q):
     return roll, pitch, yaw
 
 
-class MPCTrajectoryFollowerROS1:
+class MPCTrajectoryFollowerManualROS1:
     """
-    Versi TRAJECTORY TRACKING:
+    Versi TRAJECTORY TRACKING MANUAL-OFFBOARD:
     - Referensi posisi + yaw dari /trajectory/ref_pose (ENU)
     - Referensi kecepatan dari /trajectory/ref_vel (ENU)
     - MPC tracking state x = [pos_ned, vel_ned] → x_ref dari traj
+    - Mode OFFBOARD + ARM diatur manual oleh pilot (QGC / RC).
+    - Node hanya mengontrol saat mode=OFFBOARD dan armed=True.
     """
 
     def __init__(self):
-        self.node_name = "mpc_trajectory_follower"
+        self.node_name = "mpc_trajectory_follower_manual"
         rospy.loginfo("="*60)
-        rospy.loginfo("MPC Trajectory Tracking (ROS1 + MAVROS)")
+        rospy.loginfo("MPC Trajectory Tracking (ROS1 + MAVROS) - MANUAL OFFBOARD")
         rospy.loginfo("Input ref: /trajectory/ref_pose & /trajectory/ref_vel")
         rospy.loginfo("Output   : /mavros/setpoint_raw/attitude")
+        rospy.loginfo("Mode & ARM dikendalikan manual dari QGC/RC")
         rospy.loginfo("MPC Optimization: 10 Hz | Control Output: 50 Hz")
         rospy.loginfo("="*60)
 
@@ -235,13 +243,14 @@ class MPCTrajectoryFollowerROS1:
         self.mpc = MPCPositionController(dt=0.1, Np=6, Nc=3)
         rospy.loginfo("MPC Controller initialized: dt=0.1s, Np=6, Nc=3")
 
-        # State
+        # State MAVROS
         self.current_state = State()
         self.armed = False
         self.offboard_mode = False
 
-        self.current_position = np.zeros(3)      # NED
-        self.current_velocity = np.zeros(3)      # NED
+        # State UAV (NED)
+        self.current_position = np.zeros(3)      # [N,E,D]
+        self.current_velocity = np.zeros(3)      # [vN,vE,vD]
         self.current_orientation = np.array([1.0, 0.0, 0.0, 0.0])  # w,x,y,z
 
         # Trajectory reference (NED)
@@ -252,8 +261,8 @@ class MPCTrajectoryFollowerROS1:
         self.ref_pose_received = False
         self.ref_vel_received = False
 
+        # Output MPC (aks NED) + attitude hasil konversi
         self.mpc_acceleration = np.zeros(3)
-
         self.attitude_roll = 0.0
         self.attitude_pitch = 0.0
         self.attitude_yaw = 0.0
@@ -286,19 +295,10 @@ class MPCTrajectoryFollowerROS1:
             "/mavros/setpoint_raw/attitude", AttitudeTarget, queue_size=20
         )
 
-        # ===================== SERVICES =====================
-        rospy.loginfo("Waiting for mavros services...")
-        rospy.wait_for_service("/mavros/cmd/arming")
-        rospy.wait_for_service("/mavros/set_mode")
-
-        self.arming_client = rospy.ServiceProxy("/mavros/cmd/arming", CommandBool)
-        self.set_mode_client = rospy.ServiceProxy("/mavros/set_mode", SetMode)
-        rospy.loginfo("MAVROS services ready.")
-
         # ===================== TIMERS =====================
         self.mpc_timer = rospy.Timer(rospy.Duration(0.1), self.mpc_callback)    # 10 Hz
         self.ctrl_timer = rospy.Timer(rospy.Duration(0.02), self.control_loop)  # 50 Hz
-        self.sm_timer = rospy.Timer(rospy.Duration(0.5), self.state_machine_callback)  # 2 Hz
+        self.sm_timer = rospy.Timer(rospy.Duration(0.5), self.state_monitor_callback)  # 2 Hz
 
     # ===================== Callbacks =====================
 
@@ -312,13 +312,13 @@ class MPCTrajectoryFollowerROS1:
 
         if prev_armed != self.armed:
             if self.armed:
-                rospy.loginfo("✓ ARMED")
+                rospy.loginfo("✓ ARMED (dari pilot/QGC)")
             else:
                 rospy.logwarn("✗ DISARMED")
 
         if prev_offboard != self.offboard_mode:
             if self.offboard_mode:
-                rospy.loginfo("✓ OFFBOARD MODE ACTIVE")
+                rospy.loginfo("✓ OFFBOARD MODE ACTIVE (set manual)")
             else:
                 rospy.logwarn("✗ OFFBOARD MODE INACTIVE")
 
@@ -351,7 +351,7 @@ class MPCTrajectoryFollowerROS1:
         d = -msg.pose.position.z
         self.ref_position = np.array([n, e, d])
 
-        # Yaw dari quaternion (langsung dari orientasi ENU, konsisten dengan cara lama)
+        # Yaw dari quaternion
         q = [
             msg.pose.orientation.w,
             msg.pose.orientation.x,
@@ -382,17 +382,17 @@ class MPCTrajectoryFollowerROS1:
     # ===================== MPC timer =====================
 
     def mpc_callback(self, event):
-        if not self.offboard_mode:
+        # MPC hanya aktif jika mode OFFBOARD & armed
+        if not (self.offboard_mode and self.armed):
             return
 
-        # Jika belum ada trajectory ref, tahan di posisi sekarang (hover)
+        # Jika belum ada trajectory ref, tahan dekat posisi sekarang (hover pada z=-5m)
         if not self.ref_pose_received:
             self.ref_position[0] = self.current_position[0]
             self.ref_position[1] = self.current_position[1]
             self.ref_position[2] = -5.0
             self.ref_velocity[:] = 0.0
         else:
-            # kalau pose sudah ada tapi vel belum pernah diterima, anggap vel=0
             if not self.ref_vel_received:
                 self.ref_velocity[:] = 0.0
 
@@ -442,6 +442,10 @@ class MPCTrajectoryFollowerROS1:
         return np.array([wxyz[1], wxyz[2], wxyz[3], wxyz[0]], dtype=float)
 
     def control_loop(self, event):
+        """
+        Tetap publish attitude setpoint terus menerus (50 Hz).
+        PX4 akan memakai setpoint ini hanya ketika mode=OFFBOARD.
+        """
         att = AttitudeTarget()
         att.header.stamp = rospy.Time.now()
         att.header.frame_id = "map"
@@ -473,32 +477,35 @@ class MPCTrajectoryFollowerROS1:
                 f"{att.orientation.z:.3f},{att.orientation.w:.3f}]"
             )
 
-    # ===================== State machine =====================
+    # ===================== State monitor (tanpa command) =====================
 
-    def state_machine_callback(self, event):
-        # kirim beberapa setpoint dulu → lalu OFFBOARD + ARM
-        if self.current_state.mode != "OFFBOARD" and self.setpoint_counter > 50:
-            self.set_offboard_mode()
-
-        if (not self.current_state.armed) and self.current_state.mode == "OFFBOARD":
-            self.arm()
-
-        if self.current_state.mode == "OFFBOARD" and self.current_state.armed:
+    def state_monitor_callback(self, event):
+        """
+        Hanya monitor status dan error, TANPA kirim perintah ARM / OFFBOARD.
+        Semua kontrol mode dilakukan manual oleh pilot.
+        """
+        if self.offboard_mode and self.armed:
             err = np.linalg.norm(self.current_position - self.ref_position)
             vel_norm = np.linalg.norm(self.current_velocity)
             acc_norm = np.linalg.norm(self.mpc_acceleration)
 
             if self.ref_pose_received:
                 rospy.loginfo(
-                    f"TRK Pos: [{self.current_position[0]:.1f}, {self.current_position[1]:.1f}, {self.current_position[2]:.1f}] | "
+                    f"[MPC ACTIVE] Pos: [{self.current_position[0]:.1f}, {self.current_position[1]:.1f}, {self.current_position[2]:.1f}] | "
                     f"Ref: [{self.ref_position[0]:.1f}, {self.ref_position[1]:.1f}, {self.ref_position[2]:.1f}] | "
                     f"Err: {err:.2f}m | Vel: {vel_norm:.2f} m/s | Acc: {acc_norm:.2f} m/s²"
                 )
             else:
                 rospy.loginfo(
-                    f"Hovering at: [{self.current_position[0]:.1f}, {self.current_position[1]:.1f}, {self.current_position[2]:.1f}] "
-                    f"| Waiting for trajectory reference..."
+                    f"[MPC ACTIVE] Hovering dekat posisi sekarang, belum ada trajectory reference."
                 )
+        else:
+            rospy.loginfo_throttle(
+                2.0,
+                f"[MPC STANDBY] mode={self.current_state.mode}, armed={self.armed}, "
+                f"ref_pose={'OK' if self.ref_pose_received else 'NO'}, "
+                f"ref_vel={'OK' if self.ref_vel_received else 'NO'}"
+            )
 
     # ===================== Helpers =====================
 
@@ -532,31 +539,11 @@ class MPCTrajectoryFollowerROS1:
 
         return np.array([w, x, y, z])
 
-    def arm(self):
-        try:
-            res = self.arming_client(True)
-            if res.success:
-                rospy.loginfo(">>> ARM command sent via MAVROS <<<")
-            else:
-                rospy.logerr("Failed to arm via MAVROS")
-        except rospy.ServiceException as e:
-            rospy.logerr(f"Arming service call failed: {e}")
-
-    def set_offboard_mode(self):
-        try:
-            res = self.set_mode_client(custom_mode="OFFBOARD")
-            if res.mode_sent:
-                rospy.loginfo(">>> OFFBOARD mode command sent via MAVROS <<<")
-            else:
-                rospy.logerr("Failed to set OFFBOARD mode via MAVROS")
-        except rospy.ServiceException as e:
-            rospy.logerr(f"SetMode service call failed: {e}")
-
 
 def main():
-    rospy.init_node("mpc_trajectory_follower", anonymous=False)
-    node = MPCTrajectoryFollowerROS1()
-    rospy.loginfo("MPC Trajectory Follower ROS1 started.")
+    rospy.init_node("mpc_trajectory_follower_manual", anonymous=False)
+    node = MPCTrajectoryFollowerManualROS1()
+    rospy.loginfo("MPC Trajectory Follower ROS1 (manual OFFBOARD) started.")
     rospy.spin()
 
 
