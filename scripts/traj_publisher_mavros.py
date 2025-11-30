@@ -34,7 +34,7 @@ class TrajectoryPublisherMavros(object):
         # Kecepatan referensi sepanjang lintasan (NED) [m/s]
         self.ref_speed = rospy.get_param("~ref_speed", 2.0)  # konstanta
         self.loop_trajectory = rospy.get_param("~loop_trajectory", True)
-
+        
         # Circle params
         circle_center_n = rospy.get_param("~circle_center_n", 0.0)
         circle_center_e = rospy.get_param("~circle_center_e", 0.0)
