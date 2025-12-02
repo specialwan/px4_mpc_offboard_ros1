@@ -59,7 +59,7 @@ class MPCPositionController:
 
         # Cost matrices - SAFE MODE REAL FLIGHT
         self.Q = np.diag([
-            60.0, 60.0, 140.0,   # posisi
+            60.0, 60.0, 180.0,   # posisi
             12.0, 12.0, 90.0     # kecepatan
         ])
 
@@ -245,7 +245,7 @@ class MPCTrajectoryFollowerROS1:
         self.current_orientation = np.array([1.0, 0.0, 0.0, 0.0])  # w,x,y,z
 
         # Trajectory reference (NED)
-        self.ref_position = np.array([0.0, 0.0, -5.0])
+        self.ref_position = np.array([0.0, 0.0, -2.5])
         self.ref_velocity = np.zeros(3)
         self.ref_yaw = 0.0
 
@@ -389,7 +389,7 @@ class MPCTrajectoryFollowerROS1:
         if not self.ref_pose_received:
             self.ref_position[0] = self.current_position[0]
             self.ref_position[1] = self.current_position[1]
-            self.ref_position[2] = -5.0
+            self.ref_position[2] = -2.5
             self.ref_velocity[:] = 0.0
         else:
             # kalau pose sudah ada tapi vel belum pernah diterima, anggap vel=0

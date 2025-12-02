@@ -4,6 +4,7 @@
     <param name="waypoint_mode" value="square"/>
     <param name="square_size" value="20.0"/>
     <param name="ref_speed" value="2.0"/>
+    <param name="square_altitude" value="-2.5"/>
     <param name="start_at_current_pose" value="true"/>
   </node>
 </launch>

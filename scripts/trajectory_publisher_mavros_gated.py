@@ -1,48 +1,46 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Time-based Trajectory Publisher (ROS1 + MAVROS) with option
-to start the trajectory at the CURRENT UAV POSE.
+Time-based Trajectory Publisher to PX4 (ROS1 + MAVROS) dengan ALTITUDE GATE
 
-Perbedaan utama dari versi sebelumnya:
-- Param baru: ~start_at_current_pose (default: True)
-- Jika True:
-    * Node menunggu pose pertama dari /mavros/local_position/pose
-    * Bentuk lintasan (square/circle/helix/default) dibikin di sekitar origin
-    * Lalu digeser (offset) supaya titik pertama path = posisi UAV saat ini
-- Jika False:
-    * Perilaku lama: center_n, center_e, altitude, dst adalah koordinat absolut NED
-
-Output:
-- /trajectory/ref_pose  (PoseStamped, ENU)
-- /trajectory/ref_vel   (TwistStamped, ENU)
-- /waypoint/target      (PoseStamped, ENU)  -> kompatibel dengan MPC lama / logger
+- Generate path di NED: default / circle / square / helix
+- Precompute panjang segmen → waktu tiap segmen untuk ref_speed konstan
+- Publish referensi:
+    /trajectory/ref_pose   (PoseStamped, ENU)
+    /trajectory/ref_vel    (TwistStamped, ENU)
+    /waypoint/target       (PoseStamped, ENU)
+- Tambahan: altitude gate
+  * Selama drone belum stabil di ketinggian hover_altitude → hanya kirim setpoint hover
+  * Setelah stabil (mis. 5 m ± 0.3 m selama 2 s) → baru start lintasan time-based
 """
 
 import rospy
 import numpy as np
 
 from geometry_msgs.msg import PoseStamped, TwistStamped
+from mavros_msgs.msg import State
 
 
-class TrajectoryPublisherMavros(object):
+class Px4TrajectoryPublisherGated(object):
     def __init__(self):
-        rospy.loginfo("Init TrajectoryPublisherMavros (time-based trajectory)")
+        rospy.loginfo("Init Px4TrajectoryPublisherGated (time-based + altitude gate)")
 
-        # ===================== PARAMETER =====================
+        # ===================== PARAM TRAJECTORY =====================
         self.waypoint_mode = rospy.get_param("~waypoint_mode", "default")
-
-        # Trajectory speed (NED) [m/s]
         self.ref_speed = rospy.get_param("~ref_speed", 2.0)
         self.loop_trajectory = rospy.get_param("~loop_trajectory", False)
-
-        # NEW: anchor trajectory to current UAV pose?
         self.start_at_current_pose = rospy.get_param("~start_at_current_pose", True)
+
+        # Hover / gate params
+        self.hover_altitude = rospy.get_param("~hover_altitude", 2.5)   # ENU +up (m)
+        self.alt_tolerance = rospy.get_param("~alt_tolerance", 0.3)     # m
+        self.hover_stable_time = rospy.get_param("~hover_stable_time", 1.0)  # s
+        self.gate_on_altitude = rospy.get_param("~gate_on_altitude", True)
 
         # Circle params
         self.circle_center_n = rospy.get_param("~circle_center_n", 0.0)
         self.circle_center_e = rospy.get_param("~circle_center_e", 0.0)
-        self.circle_radius = rospy.get_param("~circle_radius", 25.0)
+        self.circle_radius = rospy.get_param("~circle_radius", 10.0)
         self.circle_altitude = rospy.get_param("~circle_altitude", -5.0)
         self.circle_points = int(rospy.get_param("~circle_points", 80))
 
@@ -63,94 +61,87 @@ class TrajectoryPublisherMavros(object):
         self.helix_turns = rospy.get_param("~helix_turns", 3.0)
         self.helix_points = int(rospy.get_param("~helix_points", 120))
 
-        # ===================== STATE INTERNAL =====================
-        self.positions = None          # (N,3) NED
-        self.yaws = None               # (N,)
+        # ===================== STATE TRAJECTORY =====================
+        self.positions = None  # NED (N,E,D)
+        self.yaws = None
         self.segment_lengths = None
         self.segment_times = None
         self.cum_times = None
         self.total_time = 0.0
-
-        self.path_points = None        # list of [n,e,d,yaw]
+        self.path_points = None
         self.traj_initialized = False
 
-        # Posisi UAV (ENU) dari MAVROS
+        self.t0 = None  # waktu start TRACK mode
+
+        # Mode internal: "WAIT_ALT" atau "TRACK"
+        self.mode = "WAIT_ALT"
+        self.alt_ready_since = None
+
+        # ===================== STATE MAVROS =====================
+        self.current_state = State()
         self.current_pos_enu = np.zeros(3)
         self.pose_received = False
 
-        # Waktu awal traj
-        self.t0 = None
-
         # ===================== PUB / SUB =====================
-        # Referensi untuk MPC
         self.pose_pub = rospy.Publisher(
             "/trajectory/ref_pose", PoseStamped, queue_size=10
         )
         self.vel_pub = rospy.Publisher(
             "/trajectory/ref_vel", TwistStamped, queue_size=10
         )
-
-        # Kompatibel dengan MPC lama & data logger
         self.waypoint_pub = rospy.Publisher(
             "/waypoint/target", PoseStamped, queue_size=10
         )
 
-        # SUB pose UAV → untuk anchor trajektori bila diperlukan
+        self.state_sub = rospy.Subscriber(
+            "/mavros/state", State, self.state_callback, queue_size=10
+        )
         self.pos_sub = rospy.Subscriber(
             "/mavros/local_position/pose",
             PoseStamped,
             self.position_callback,
-            queue_size=1
+            queue_size=10
         )
 
-        # Jika TIDAK start_at_current_pose → bangun trajektori langsung
+        # Kalau tidak anchor ke posisi UAV, build path langsung
         if not self.start_at_current_pose:
             self.build_path(anchor_to_current=False)
         else:
-            rospy.loginfo("start_at_current_pose = True → menunggu pose awal UAV...")
+            rospy.loginfo("start_at_current_pose = True → path akan di-anchor saat pose pertama diterima.")
 
-        # Timer publish (20 Hz)
+        # Timer publish 20 Hz
         self.timer = rospy.Timer(rospy.Duration(0.05), self.timer_cb)
 
-    # ================================================================
-    # POSITION CALLBACK (UNTUK ANCHOR TRAJECTORY)
-    # ================================================================
+    # ======================================================================
+    # MAVROS callbacks
+    # ======================================================================
+    def state_callback(self, msg: State):
+        self.current_state = msg
+
     def position_callback(self, msg: PoseStamped):
-        # ENU
+        # ENU posisi
         self.current_pos_enu[:] = [
             msg.pose.position.x,
             msg.pose.position.y,
-            msg.pose.position.z,
+            msg.pose.position.z
         ]
         if not self.pose_received:
             self.pose_received = True
-            rospy.loginfo("✅ Pose pertama dari /mavros/local_position/pose diterima")
+            rospy.loginfo("✅ Pose pertama dari /mavros/local_position/pose diterima.")
 
-        # Jika kita mau anchor ke posisi UAV dan path belum dibangun → bangun sekarang
-        if self.start_at_current_pose and not self.traj_initialized:
-            self.build_path(anchor_to_current=True)
+            if self.start_at_current_pose and not self.traj_initialized:
+                self.build_path(anchor_to_current=True)
 
-    # ================================================================
-    # BUILD PATH (NED) + PRECOMPUTE SEGMENTS
-    # ================================================================
+    # ======================================================================
+    # BUILD PATH + PRECOMPUTE
+    # ======================================================================
     def build_path(self, anchor_to_current=False):
-        """
-        Bangun self.path_points (list [n,e,d,yaw]) dan precompute segments.
-
-        Jika anchor_to_current=True:
-          - bentuk lintasan dibuat di sekitar ORIGIN (center=(0,0))
-          - lalu digeser supaya titik pertama = posisi UAV saat ini (NED)
-        Jika anchor_to_current=False:
-          - gunakan center_n, center_e, altitude params seperti biasa (absolut)
-        """
         if anchor_to_current and not self.pose_received:
-            rospy.logwarn("build_path dipanggil sebelum pose diterima, skip dulu.")
+            rospy.logwarn("build_path dipanggil sebelum pose diterima, skip.")
             return
 
-        # ---------- 1) Generate base path di NED ----------
         if anchor_to_current:
-            # Kita buat shape di sekitar origin dengan altitude 0,
-            # nanti seluruh path di-offset ke posisi UAV (n,e,d) sekarang.
+            # bentuk path di sekitar origin (altitude 0), nanti di-offset ke posisi UAV
             if self.waypoint_mode == "circle":
                 path = self.generate_circle_waypoints(
                     center_n=0.0,
@@ -179,7 +170,6 @@ class TrajectoryPublisherMavros(object):
                     num_points=self.helix_points
                 )
             else:
-                # default: kotak kecil 5x5 di sekitar origin, alt=0
                 path = [
                     [0.0, 0.0, 0.0, 0.0],
                     [5.0, 0.0, 0.0, 0.0],
@@ -188,32 +178,26 @@ class TrajectoryPublisherMavros(object):
                     [0.0, 0.0, 0.0, -np.pi/2],
                 ]
 
-            # Offset seluruh path supaya titik pertama = posisi UAV sekarang
-            # Konversi pose ENU → NED
+            # offset XY ke posisi UAV; ketinggian path kita set ke -hover_altitude
             n_uav = self.current_pos_enu[1]
             e_uav = self.current_pos_enu[0]
-            d_uav = -self.current_pos_enu[2]
+            d_hover = -self.hover_altitude  # NED (down)
 
-            first_n = path[0][0]
-            first_e = path[0][1]
-            first_d = path[0][2]
-
+            first_n, first_e, _, _ = path[0]
             dn = n_uav - first_n
             de = e_uav - first_e
-            dd = d_uav - first_d
 
             for wp in path:
                 wp[0] += dn
                 wp[1] += de
-                wp[2] += dd
+                wp[2] = d_hover   # paksa semua titik di ketinggian hover
 
             rospy.loginfo(
-                "🚀 Trajectory anchored ke posisi UAV: NED start=(%.2f, %.2f, %.2f)",
-                n_uav, e_uav, d_uav
+                "🚀 Trajectory anchored ke UAV: start NED ≈ (%.2f, %.2f, %.2f)",
+                n_uav, e_uav, d_hover
             )
-
         else:
-            # Perilaku lama: gunakan center_* & altitude absolut
+            # path absolut (kalau tidak pakai anchor)
             if self.waypoint_mode == "circle":
                 path = self.generate_circle_waypoints(
                     center_n=self.circle_center_n,
@@ -243,38 +227,38 @@ class TrajectoryPublisherMavros(object):
                 )
             else:
                 path = [
-                    [0.0, 0.0, -5.0, 0.0],
-                    [5.0, 0.0, -5.0, 0.0],
-                    [5.0, 5.0, -5.0, np.pi/2],
-                    [0.0, 5.0, -5.0, np.pi],
-                    [0.0, 0.0, -5.0, -np.pi/2],
+                    [0.0, 0.0, -self.hover_altitude, 0.0],
+                    [5.0, 0.0, -self.hover_altitude, 0.0],
+                    [5.0, 5.0, -self.hover_altitude, np.pi/2],
+                    [0.0, 5.0, -self.hover_altitude, np.pi],
+                    [0.0, 0.0, -self.hover_altitude, -np.pi/2],
                 ]
 
         if len(path) < 2:
-            rospy.logwarn("Path hanya punya <=1 point. Menambah satu titik dummy.")
+            rospy.logwarn("Path hanya punya <=1 titik, menyalin titik pertama.")
             path.append(path[0])
 
         self.path_points = path
-
-        # ---------- 2) Precompute segments ----------
         self._precompute_segments()
-
         self.traj_initialized = True
         self.t0 = rospy.Time.now().to_sec()
 
+        self.mode = "WAIT_ALT"
+        self.alt_ready_since = None
+
         rospy.loginfo("=" * 60)
-        rospy.loginfo("TrajectoryPublisherMavros (time-based)")
-        rospy.loginfo("Mode trajektori : %s", self.waypoint_mode)
-        rospy.loginfo("Jumlah titik    : %d", len(self.path_points))
-        rospy.loginfo("Kecepatan ref   : %.2f m/s", self.ref_speed)
-        rospy.loginfo("Total waktu     : %.2f s", self.total_time)
-        rospy.loginfo("Loop trajectory : %s", "Yes" if self.loop_trajectory else "No")
-        rospy.loginfo("Start at current pose : %s", "Yes" if self.start_at_current_pose else "No")
-        rospy.loginfo("Output pose     : /trajectory/ref_pose & /waypoint/target")
-        rospy.loginfo("Output vel      : /trajectory/ref_vel")
+        rospy.loginfo("PX4 Trajectory Publisher (time-based, gated)")
+        rospy.loginfo("Mode trajektori   : %s", self.waypoint_mode)
+        rospy.loginfo("Jumlah titik      : %d", len(self.path_points))
+        rospy.loginfo("Kecepatan ref     : %.2f m/s", self.ref_speed)
+        rospy.loginfo("Total waktu       : %.2f s", self.total_time)
+        rospy.loginfo("Loop trajectory   : %s", "Yes" if self.loop_trajectory else "No")
+        rospy.loginfo("Start at curr pos : %s", "Yes" if self.start_at_current_pose else "No")
+        rospy.loginfo("Hover altitude    : %.2f m ENU", self.hover_altitude)
+        rospy.loginfo("Altitude gate     : %s", "ON" if self.gate_on_altitude else "OFF")
+        rospy.loginfo("Ref topics        : /trajectory/ref_pose, /trajectory/ref_vel, /waypoint/target")
         rospy.loginfo("=" * 60)
 
-    # --------------------------------------------------------
     def _precompute_segments(self):
         pts = np.array(self.path_points)  # (N,4)
         positions = pts[:, 0:3]
@@ -283,7 +267,6 @@ class TrajectoryPublisherMavros(object):
         deltas = positions[1:, :] - positions[:-1, :]
         seg_lengths = np.linalg.norm(deltas, axis=1)
         seg_lengths = np.where(seg_lengths < 1e-6, 1e-6, seg_lengths)
-
         seg_times = seg_lengths / max(self.ref_speed, 1e-3)
 
         cum_times = np.zeros(seg_times.shape[0] + 1)
@@ -296,56 +279,92 @@ class TrajectoryPublisherMavros(object):
         self.cum_times = cum_times
         self.total_time = float(cum_times[-1])
 
-    # ================================================================
-    # TIMER CALLBACK → HITUNG p_ref(t), v_ref(t)
-    # ================================================================
+    # ======================================================================
+    # TIMER → publish ref
+    # ======================================================================
     def timer_cb(self, event):
-        # Kalau path belum siap, jangan publish dulu
         if not self.traj_initialized or self.total_time <= 0.0:
             return
 
-        now = rospy.Time.now().to_sec()
-        if self.t0 is None:
-            self.t0 = now
-        t_rel = now - self.t0
+        # --- Tentukan mode: masih WAIT_ALT atau sudah boleh TRACK? ---
+        if self.mode == "WAIT_ALT" and self.gate_on_altitude and self.pose_received:
+            alt = self.current_pos_enu[2]  # ENU z
+            if abs(alt - self.hover_altitude) <= self.alt_tolerance:
+                if self.alt_ready_since is None:
+                    self.alt_ready_since = rospy.Time.now().to_sec()
+                else:
+                    if (rospy.Time.now().to_sec() - self.alt_ready_since) >= self.hover_stable_time:
+                        self.mode = "TRACK"
+                        self.t0 = rospy.Time.now().to_sec()
+                        rospy.loginfo(
+                            "✅ Altitude gate passed: z=%.2f m, start trajectory tracking.",
+                            alt
+                        )
+            else:
+                self.alt_ready_since = None
 
-        if self.loop_trajectory:
-            t_rel = np.fmod(t_rel, self.total_time)
-            if t_rel < 0:
-                t_rel += self.total_time
-        else:
-            t_rel = max(0.0, min(t_rel, self.total_time))
+        if not self.gate_on_altitude and self.mode == "WAIT_ALT":
+            self.mode = "TRACK"
+            self.t0 = rospy.Time.now().to_sec()
+            rospy.loginfo("Altitude gate disabled → langsung TRACK mode.")
 
-        j = np.searchsorted(self.cum_times, t_rel, side="right") - 1
-        j = int(np.clip(j, 0, len(self.segment_times) - 1))
+        # ==========================================================
+        # Hitung referensi
+        # ==========================================================
+        if self.mode == "WAIT_ALT":
+            # Kirim titik pertama path (XY) di ketinggian hover, kecepatan nol
+            p0 = self.positions[0]
+            yaw0 = self.yaws[0]
 
-        t_start = self.cum_times[j]
-        dt_seg = self.segment_times[j]
+            p_hover = np.array([p0[0], p0[1], -self.hover_altitude])  # NED (D negative)
+            # NED → ENU
+            enu_pos = np.array([p_hover[1], p_hover[0], -p_hover[2]])
+            enu_vel = np.zeros(3)
 
-        if dt_seg <= 0.0:
-            tau = 0.0
-        else:
-            tau = (t_rel - t_start) / dt_seg
-            tau = float(np.clip(tau, 0.0, 1.0))
+            yaw_ref = yaw0
+        else:  # TRACK mode
+            now = rospy.Time.now().to_sec()
+            if self.t0 is None:
+                self.t0 = now
+            t_rel = now - self.t0
 
-        p0 = self.positions[j]
-        p1 = self.positions[j + 1]
-        p_ref = (1.0 - tau) * p0 + tau * p1
+            if self.loop_trajectory:
+                t_rel = np.fmod(t_rel, self.total_time)
+                if t_rel < 0:
+                    t_rel += self.total_time
+            else:
+                t_rel = max(0.0, min(t_rel, self.total_time))
 
-        yaw0 = self.yaws[j]
-        yaw1 = self.yaws[j + 1]
-        yaw_diff = np.arctan2(np.sin(yaw1 - yaw0), np.cos(yaw1 - yaw0))
-        yaw_ref = yaw0 + tau * yaw_diff
+            j = np.searchsorted(self.cum_times, t_rel, side="right") - 1
+            j = int(np.clip(j, 0, len(self.segment_times) - 1))
 
-        dp = p1 - p0
-        seg_len = self.segment_lengths[j]
-        dir_vec = dp / max(seg_len, 1e-6)
-        v_ref_ned = dir_vec * self.ref_speed
+            t_start = self.cum_times[j]
+            dt_seg = self.segment_times[j]
+            if dt_seg <= 0.0:
+                tau = 0.0
+            else:
+                tau = (t_rel - t_start) / dt_seg
+                tau = float(np.clip(tau, 0.0, 1.0))
 
-        # NED → ENU
-        enu_pos = np.array([p_ref[1], p_ref[0], -p_ref[2]])
-        enu_vel = np.array([v_ref_ned[1], v_ref_ned[0], -v_ref_ned[2]])
+            p0 = self.positions[j]
+            p1 = self.positions[j + 1]
+            p_ref = (1.0 - tau) * p0 + tau * p1
 
+            yaw0 = self.yaws[j]
+            yaw1 = self.yaws[j + 1]
+            yaw_diff = np.arctan2(np.sin(yaw1 - yaw0), np.cos(yaw1 - yaw0))
+            yaw_ref = yaw0 + tau * yaw_diff
+
+            dp = p1 - p0
+            seg_len = self.segment_lengths[j]
+            dir_vec = dp / max(seg_len, 1e-6)
+            v_ref_ned = dir_vec * self.ref_speed
+
+            # NED → ENU
+            enu_pos = np.array([p_ref[1], p_ref[0], -p_ref[2]])
+            enu_vel = np.array([v_ref_ned[1], v_ref_ned[0], -v_ref_ned[2]])
+
+        # ===================== PUBLISH =====================
         pose_msg = PoseStamped()
         pose_msg.header.stamp = rospy.Time.now()
         pose_msg.header.frame_id = "map"
@@ -353,6 +372,7 @@ class TrajectoryPublisherMavros(object):
         pose_msg.pose.position.y = float(enu_pos[1])
         pose_msg.pose.position.z = float(enu_pos[2])
 
+        # yaw → quaternion (roll=0, pitch=0)
         qz = np.sin(yaw_ref / 2.0)
         qw = np.cos(yaw_ref / 2.0)
         pose_msg.pose.orientation.x = 0.0
@@ -371,9 +391,9 @@ class TrajectoryPublisherMavros(object):
         self.vel_pub.publish(vel_msg)
         self.waypoint_pub.publish(pose_msg)
 
-    # ================================================================
-    # TRAJECTORY GENERATORS (NED)
-    # ================================================================
+    # ======================================================================
+    # TRAJECTORY GENERATORS (NED) – sama seperti sebelumnya
+    # ======================================================================
     def generate_circle_waypoints(self, center_n=0.0, center_e=0.0,
                                   radius=25.0, altitude=-5.0, num_points=16):
         waypoints = []
@@ -387,10 +407,8 @@ class TrajectoryPublisherMavros(object):
 
         circumference = 2.0 * np.pi * radius
         avg_spacing = circumference / num_points
-
         rospy.loginfo(
-            "Circle trajectory: center=(%.1f,%.1f), radius=%.1f m, alt=%.1f m, "
-            "%d points, spacing=%.2f m",
+            "Circle trajectory: center=(%.1f,%.1f), radius=%.1f m, alt=%.1f m, %d points, spacing=%.2f m",
             center_n, center_e, radius, -altitude, num_points, avg_spacing
         )
         return waypoints
@@ -411,20 +429,20 @@ class TrajectoryPublisherMavros(object):
             start_corner = corners[i]
             end_corner = corners[(i + 1) % 4]
 
-            direction_n = end_corner[0] - start_corner[0]
-            direction_e = end_corner[1] - start_corner[1]
-            yaw_current = np.arctan2(direction_e, direction_n)
+            dn = end_corner[0] - start_corner[0]
+            de = end_corner[1] - start_corner[1]
+            yaw_current = np.arctan2(de, dn)
 
             next_corner = corners[(i + 2) % 4]
-            direction_n_next = next_corner[0] - end_corner[0]
-            direction_e_next = next_corner[1] - end_corner[1]
-            yaw_next = np.arctan2(direction_e_next, direction_n_next)
+            dn_next = next_corner[0] - end_corner[0]
+            de_next = next_corner[1] - end_corner[1]
+            yaw_next = np.arctan2(de_next, dn_next)
 
             num_points = points_per_side + 1
             for j in range(num_points):
                 t = float(j) / float(points_per_side + 1)
-                n = start_corner[0] + t * direction_n
-                e = start_corner[1] + t * direction_e
+                n = start_corner[0] + t * dn
+                e = start_corner[1] + t * de
 
                 if constant_yaw:
                     yaw = 0.0
@@ -444,8 +462,7 @@ class TrajectoryPublisherMavros(object):
 
         yaw_mode = "constant (0°)" if constant_yaw else "following path direction"
         rospy.loginfo(
-            "Square trajectory: center=(%.1f,%.1f), size=%.1f m, alt=%.1f m, "
-            "%d points, yaw=%s",
+            "Square trajectory: center=(%.1f,%.1f), size=%.1f m, alt=%.1f m, points=%d, yaw=%s",
             center_n, center_e, size, -altitude, len(waypoints), yaw_mode
         )
         return waypoints
@@ -454,7 +471,6 @@ class TrajectoryPublisherMavros(object):
                                  start_altitude=-10.0, end_altitude=-30.0,
                                  turns=3.0, num_points=120, add_transition=True):
         waypoints = []
-
         if add_transition:
             waypoints.append([float(center_n), float(center_e),
                               float(start_altitude), 0.0])
@@ -467,40 +483,31 @@ class TrajectoryPublisherMavros(object):
             e = center_e + radius * np.sin(angle)
             d = start_altitude + t * (end_altitude - start_altitude)
             yaw = angle + np.pi / 2.0
-
             waypoints.append([float(n), float(e), float(d), float(yaw)])
 
         total_height = abs(end_altitude - start_altitude)
         direction = "descending" if end_altitude < start_altitude else "ascending"
         transition_count = 1 if add_transition else 0
 
-        rospy.loginfo("📐 Helix trajectory generated:")
-        rospy.loginfo("   Center: (%.1f, %.1f) m", center_n, center_e)
-        rospy.loginfo("   Radius: %.1f m", radius)
+        rospy.loginfo("Helix trajectory:")
+        rospy.loginfo("  Center: (%.1f, %.1f) m", center_n, center_e)
+        rospy.loginfo("  Radius: %.1f m", radius)
         rospy.loginfo(
-            "   Altitude: %.1f → %.1f m (%s, Δ=%.1f m)",
+            "  Altitude: %.1f → %.1f m (%s, Δ=%.1f m)",
             -start_altitude, -end_altitude, direction, total_height
         )
-        rospy.loginfo("   Turns: %.1f", turns)
         rospy.loginfo(
-            "   Points: %d helix + %d transition = %d total",
-            num_points, transition_count, len(waypoints)
+            "  Turns: %.1f, Points: %d helix + %d transition",
+            turns, num_points, transition_count
         )
-        rospy.loginfo(
-            "   Arc length: ~%.1f m horizontal + %.1f m vertical",
-            2 * np.pi * radius * turns, total_height
-        )
-
         return waypoints
 
 
 def main():
-    rospy.init_node("trajectory_publisher_mavros_traj", anonymous=False)
-    node = TrajectoryPublisherMavros()
-    try:
-        rospy.spin()
-    except KeyboardInterrupt:
-        pass
+    rospy.init_node("px4_trajectory_publisher_gated", anonymous=False)
+    node = Px4TrajectoryPublisherGated()
+    rospy.loginfo("PX4 Trajectory Publisher (gated) started.")
+    rospy.spin()
 
 
 if __name__ == "__main__":

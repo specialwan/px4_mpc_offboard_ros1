@@ -1,0 +1,99 @@
+<launch>
+  <!--
+    PX4 Time-based Trajectory Publisher (with altitude gate)
+
+    Asumsi:
+    - MAVROS sudah dijalankan terpisah (mavros.launch)
+    - Frame lokal PX4: "map" / "local_origin"
+  -->
+
+  <!-- ==== PARAMETER UTAMA ==== -->
+  <!-- mode lintasan: default | circle | square | helix -->
+  <arg name="waypoint_mode"          default="square"/>
+
+  <!-- kecepatan referensi di sepanjang lintasan (m/s) -->
+  <arg name="ref_speed"              default="2.0"/>
+
+  <!-- apakah lintasan di-loop terus -->
+  <arg name="loop_trajectory"        default="false"/>
+
+  <!-- true: path di-anchor ke posisi drone saat pose pertama diterima -->
+  <arg name="start_at_current_pose"  default="true"/>
+
+  <!-- ==== ALTITUDE GATE ==== -->
+  <!-- ketinggian hover sebelum mulai jalan lintasan (ENU, +up) -->
+  <arg name="hover_altitude"         default="2.5"/>
+  <!-- toleransi ketinggian agar dianggap sudah di hover (m) -->
+  <arg name="alt_tolerance"          default="0.3"/>
+  <!-- berapa lama harus berada di dalam window ketinggian (s) -->
+  <arg name="hover_stable_time"      default="2.0"/>
+  <!-- kalau mau langsung jalan tanpa nunggu hover: set false -->
+  <arg name="gate_on_altitude"       default="true"/>
+
+  <!-- ==== PARAMETER LINTASAN CIRCLE (jika waypoint_mode=circle) ==== -->
+  <arg name="circle_center_n"        default="0.0"/>
+  <arg name="circle_center_e"        default="0.0"/>
+  <arg name="circle_radius"          default="10.0"/>
+  <!-- altitude NED (negatif ke bawah) - tidak terlalu penting,
+       karena untuk start_at_current_pose=true akan dipaksa ke -hover_altitude -->
+  <arg name="circle_altitude"        default="-5.0"/>
+  <arg name="circle_points"          default="80"/>
+
+  <!-- ==== PARAMETER LINTASAN SQUARE (jika waypoint_mode=square) ==== -->
+  <arg name="square_center_n"        default="0.0"/>
+  <arg name="square_center_e"        default="0.0"/>
+  <arg name="square_size"            default="20.0"/>
+  <arg name="square_altitude"        default="-2.5"/>
+  <arg name="square_points_per_side" default="10"/>
+  <arg name="square_constant_yaw"    default="false"/>
+
+  <!-- ==== PARAMETER LINTASAN HELIX (jika waypoint_mode=helix) ==== -->
+  <arg name="helix_center_n"         default="0.0"/>
+  <arg name="helix_center_e"         default="0.0"/>
+  <arg name="helix_radius"           default="1.0"/>
+  <arg name="helix_start_altitude"   default="-10.0"/>
+  <arg name="helix_end_altitude"     default="-30.0"/>
+  <arg name="helix_turns"            default="3.0"/>
+  <arg name="helix_points"           default="120"/>
+
+  <!-- ==== NODE TRAJECTORY PUBLISHER GATED ==== -->
+  <node name="trajectory_publisher_mavros_gated"
+        pkg="mpc_offboard"
+        type="trajectory_publisher_mavros_gated.py"
+        output="screen">
+
+    <!-- Kirim semua arg sebagai parameter private (~param) -->
+    <param name="waypoint_mode"          value="$(arg waypoint_mode)"/>
+    <param name="ref_speed"              value="$(arg ref_speed)"/>
+    <param name="loop_trajectory"        value="$(arg loop_trajectory)"/>
+    <param name="start_at_current_pose"  value="$(arg start_at_current_pose)"/>
+
+    <param name="hover_altitude"         value="$(arg hover_altitude)"/>
+    <param name="alt_tolerance"          value="$(arg alt_tolerance)"/>
+    <param name="hover_stable_time"      value="$(arg hover_stable_time)"/>
+    <param name="gate_on_altitude"       value="$(arg gate_on_altitude)"/>
+
+    <param name="circle_center_n"        value="$(arg circle_center_n)"/>
+    <param name="circle_center_e"        value="$(arg circle_center_e)"/>
+    <param name="circle_radius"          value="$(arg circle_radius)"/>
+    <param name="circle_altitude"        value="$(arg circle_altitude)"/>
+    <param name="circle_points"          value="$(arg circle_points)"/>
+
+    <param name="square_center_n"        value="$(arg square_center_n)"/>
+    <param name="square_center_e"        value="$(arg square_center_e)"/>
+    <param name="square_size"            value="$(arg square_size)"/>
+    <param name="square_altitude"        value="$(arg square_altitude)"/>
+    <param name="square_points_per_side" value="$(arg square_points_per_side)"/>
+    <param name="square_constant_yaw"    value="$(arg square_constant_yaw)"/>
+
+    <param name="helix_center_n"         value="$(arg helix_center_n)"/>
+    <param name="helix_center_e"         value="$(arg helix_center_e)"/>
+    <param name="helix_radius"           value="$(arg helix_radius)"/>
+    <param name="helix_start_altitude"   value="$(arg helix_start_altitude)"/>
+    <param name="helix_end_altitude"     value="$(arg helix_end_altitude)"/>
+    <param name="helix_turns"            value="$(arg helix_turns)"/>
+    <param name="helix_points"           value="$(arg helix_points)"/>
+
+  </node>
+
+</launch>

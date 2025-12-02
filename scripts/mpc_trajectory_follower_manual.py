@@ -254,7 +254,7 @@ class MPCTrajectoryFollowerManualROS1:
         self.current_orientation = np.array([1.0, 0.0, 0.0, 0.0])  # w,x,y,z
 
         # Trajectory reference (NED)
-        self.ref_position = np.array([0.0, 0.0, -5.0])
+        self.ref_position = np.array([0.0, 0.0, -2.5])
         self.ref_velocity = np.zeros(3)
         self.ref_yaw = 0.0
 
@@ -390,7 +390,7 @@ class MPCTrajectoryFollowerManualROS1:
         if not self.ref_pose_received:
             self.ref_position[0] = self.current_position[0]
             self.ref_position[1] = self.current_position[1]
-            self.ref_position[2] = -5.0
+            self.ref_position[2] = -2.5
             self.ref_velocity[:] = 0.0
         else:
             if not self.ref_vel_received:
