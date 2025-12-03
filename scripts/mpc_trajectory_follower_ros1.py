@@ -59,7 +59,7 @@ class MPCPositionController:
 
         # Cost matrices - SAFE MODE REAL FLIGHT
         self.Q = np.diag([
-            60.0, 60.0, 180.0,   # posisi
+            10.0, 10.0, 180.0,   # posisi
             12.0, 12.0, 90.0     # kecepatan
         ])
 
@@ -67,7 +67,7 @@ class MPCPositionController:
         self.R_delta = np.diag([0.15, 0.15, 0.15])  # penalti perubahan u
 
         self.u_prev = np.zeros(self.nu)
-        self.a_max = 3.5  # m/s^2
+        self.a_max = 10.0  # m/s^2
 
         self._build_prediction_matrices()
 
@@ -147,7 +147,7 @@ class MPCPositionController:
             return np.zeros(self.nu)
 
 
-def acceleration_to_attitude_thrust_px4(accel_ned, yaw_desired, hover_thrust=0.35, gravity=9.81):
+def acceleration_to_attitude_thrust_px4(accel_ned, yaw_desired, hover_thrust=0.4, gravity=9.81):
     ax, ay, az = accel_ned
 
     ax = np.clip(ax, -3.0, 3.0)

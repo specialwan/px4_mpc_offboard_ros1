@@ -1,0 +1,74 @@
+<launch>
+  <!--
+    Launch file untuk menjalankan:
+    1. MPC Trajectory Follower Manual (control)
+    2. Trajectory Publisher Gated (square, constant yaw)
+    3. Data Logger MAVROS Traj (logging)
+    
+    Penggunaan:
+    roslaunch mpc_offboard mpc_manual_square_logging.launch
+  -->
+
+  <!-- ==== PARAMETER TRAJECTORY SQUARE ==== -->
+  <arg name="waypoint_mode"          default="square"/>
+  <arg name="ref_speed"              default="2.0"/>
+  <arg name="loop_trajectory"        default="false"/>
+  <arg name="start_at_current_pose"  default="true"/>
+
+  <!-- Altitude gate -->
+  <arg name="hover_altitude"         default="2.5"/>
+  <arg name="alt_tolerance"          default="0.3"/>
+  <arg name="hover_stable_time"      default="2.0"/>
+  <arg name="gate_on_altitude"       default="true"/>
+
+  <!-- Square parameters -->
+  <arg name="square_center_n"        default="0.0"/>
+  <arg name="square_center_e"        default="0.0"/>
+  <arg name="square_size"            default="15.0"/>
+  <arg name="square_altitude"        default="-2.5"/>
+  <arg name="square_points_per_side" default="10"/>
+  <arg name="square_constant_yaw"    default="true"/>
+
+  <!-- ==== NODE 1: TRAJECTORY PUBLISHER GATED ==== -->
+  <node name="trajectory_publisher_mavros_gated"
+        pkg="mpc_offboard"
+        type="trajectory_publisher_mavros_gated.py"
+        output="screen">
+    
+    <param name="waypoint_mode"          value="$(arg waypoint_mode)"/>
+    <param name="ref_speed"              value="$(arg ref_speed)"/>
+    <param name="loop_trajectory"        value="$(arg loop_trajectory)"/>
+    <param name="start_at_current_pose"  value="$(arg start_at_current_pose)"/>
+    
+    <param name="hover_altitude"         value="$(arg hover_altitude)"/>
+    <param name="alt_tolerance"          value="$(arg alt_tolerance)"/>
+    <param name="hover_stable_time"      value="$(arg hover_stable_time)"/>
+    <param name="gate_on_altitude"       value="$(arg gate_on_altitude)"/>
+    
+    <param name="square_center_n"        value="$(arg square_center_n)"/>
+    <param name="square_center_e"        value="$(arg square_center_e)"/>
+    <param name="square_size"            value="$(arg square_size)"/>
+    <param name="square_altitude"        value="$(arg square_altitude)"/>
+    <param name="square_points_per_side" value="$(arg square_points_per_side)"/>
+    <param name="square_constant_yaw"    value="$(arg square_constant_yaw)"/>
+  </node>
+
+  <!-- ==== NODE 2: MPC TRAJECTORY FOLLOWER MANUAL ==== -->
+  <node name="mpc_trajectory_follower_manual"
+        pkg="mpc_offboard"
+        type="mpc_trajectory_follower_manual.py"
+        output="screen">
+  </node>
+
+  <!-- ==== NODE 3: DATA LOGGER MAVROS TRAJ ==== -->
+  <node name="data_logger_mavros_traj"
+        pkg="mpc_offboard"
+        type="data_logger_mavros_traj.py"
+        output="screen">
+    <!-- Auto stop saat trajectory selesai -->
+    <param name="auto_stop_on_finish" value="true"/>
+  </node>
+
+  <node pkg="rqt_console" type="rqt_console" name="rqt_console" />
+
+</launch>

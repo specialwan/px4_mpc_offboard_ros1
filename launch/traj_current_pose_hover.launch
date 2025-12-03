@@ -42,10 +42,10 @@
   <!-- ==== PARAMETER LINTASAN SQUARE (jika waypoint_mode=square) ==== -->
   <arg name="square_center_n"        default="0.0"/>
   <arg name="square_center_e"        default="0.0"/>
-  <arg name="square_size"            default="20.0"/>
-  <arg name="square_altitude"        default="-2.5"/>
+  <arg name="square_size"            default="15.0"/>
+  <arg name="square_altitude"        default="-2.5"/> 
   <arg name="square_points_per_side" default="10"/>
-  <arg name="square_constant_yaw"    default="false"/>
+  <arg name="square_constant_yaw"    default="true"/>
 
   <!-- ==== PARAMETER LINTASAN HELIX (jika waypoint_mode=helix) ==== -->
   <arg name="helix_center_n"         default="0.0"/>

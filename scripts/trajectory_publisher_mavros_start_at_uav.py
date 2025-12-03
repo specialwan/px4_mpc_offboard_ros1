@@ -50,9 +50,9 @@ class TrajectoryPublisherMavros(object):
         self.square_center_n = rospy.get_param("~square_center_n", 0.0)
         self.square_center_e = rospy.get_param("~square_center_e", 0.0)
         self.square_size = rospy.get_param("~square_size", 20.0)
-        self.square_altitude = rospy.get_param("~square_altitude", -5.0)
+        self.square_altitude = rospy.get_param("~square_altitude", -2.5)
         self.square_points_per_side = int(rospy.get_param("~square_points_per_side", 10))
-        self.square_constant_yaw = rospy.get_param("~square_constant_yaw", False)
+        self.square_constant_yaw = rospy.get_param("~square_constant_yaw", True)
 
         # Helix params
         self.helix_center_n = rospy.get_param("~helix_center_n", 0.0)

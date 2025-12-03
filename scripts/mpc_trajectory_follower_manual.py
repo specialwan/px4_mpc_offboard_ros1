@@ -34,7 +34,7 @@ class MPCPositionController:
     3 control inputs: [ax, ay, az] (perintah akselerasi)
     """
 
-    def __init__(self, dt=0.1, Np=6, Nc=3):
+    def __init__(self, dt=0.1, Np=10, Nc=3):
         self.dt = dt
         self.Np = Np
         self.Nc = Nc
@@ -64,7 +64,7 @@ class MPCPositionController:
 
         # Cost matrices - SAFE MODE REAL FLIGHT
         self.Q = np.diag([
-            60.0, 60.0, 140.0,   # posisi
+            70.0, 70.0, 150.0,   # posisi
             12.0, 12.0, 90.0     # kecepatan
         ])
 
@@ -240,7 +240,7 @@ class MPCTrajectoryFollowerManualROS1:
         rospy.loginfo("="*60)
 
         # MPC core
-        self.mpc = MPCPositionController(dt=0.1, Np=6, Nc=3)
+        self.mpc = MPCPositionController(dt=0.1, Np=10, Nc=3)
         rospy.loginfo("MPC Controller initialized: dt=0.1s, Np=6, Nc=3")
 
         # State MAVROS

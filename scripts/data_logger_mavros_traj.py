@@ -31,6 +31,7 @@ import pandas as pd
 import rospy
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from mavros_msgs.msg import AttitudeTarget
+from std_msgs.msg import String
 
 
 class DataLoggerMavrosTraj(object):
@@ -44,6 +45,9 @@ class DataLoggerMavrosTraj(object):
         self.output_dir = rospy.get_param('~output_dir', default_log_dir)
         self.log_rate = float(rospy.get_param('~log_rate_hz', 20.0))          # Hz
         self.auto_save_interval = float(rospy.get_param('~auto_save_interval', 30.0))  # detik
+        self.auto_stop_on_finish = rospy.get_param('~auto_stop_on_finish', True)  # Auto stop saat trajectory selesai
+
+        self.trajectory_finished = False
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -172,6 +176,14 @@ class DataLoggerMavrosTraj(object):
             AttitudeTarget,
             self.attitude_target_callback,
             queue_size=queue_size
+        )
+
+        # Subscribe ke trajectory status untuk auto-stop
+        self.trajectory_status_sub = rospy.Subscriber(
+            '/trajectory/status',
+            String,
+            self.trajectory_status_callback,
+            queue_size=10
         )
 
         # =======================
@@ -315,6 +327,20 @@ class DataLoggerMavrosTraj(object):
         q = msg.orientation
         self.attitude_target_euler = self.quaternion_to_euler(q.w, q.x, q.y, q.z)
         self.attitude_target_thrust = msg.thrust
+
+    def trajectory_status_callback(self, msg: String):
+        """Callback untuk status trajectory - auto stop saat selesai"""
+        if msg.data == "FINISHED" and not self.trajectory_finished:
+            self.trajectory_finished = True
+            rospy.loginfo("\\n" + "="*60)
+            rospy.loginfo("🏁 Trajectory FINISHED detected!")
+            rospy.loginfo("="*60)
+            
+            if self.auto_stop_on_finish:
+                rospy.loginfo("Auto-stopping data logger in 2 seconds...")
+                rospy.sleep(2.0)  # Tunggu 2 detik untuk data terakhir
+                rospy.loginfo("Shutting down data logger node.")
+                rospy.signal_shutdown("Trajectory finished - auto stop")
 
     # =======================
     # UTIL
