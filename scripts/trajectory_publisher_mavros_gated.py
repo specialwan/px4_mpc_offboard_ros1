@@ -19,7 +19,6 @@ import numpy as np
 
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from mavros_msgs.msg import State
-from std_msgs.msg import String
 
 
 class Px4TrajectoryPublisherGated(object):
@@ -77,13 +76,10 @@ class Px4TrajectoryPublisherGated(object):
         # Mode internal: "WAIT_ALT" atau "TRACK"
         self.mode = "WAIT_ALT"
         self.alt_ready_since = None
-        self.trajectory_finished = False  # Flag untuk menandai trajectory selesai
 
         # ===================== STATE MAVROS =====================
         self.current_state = State()
         self.current_pos_enu = np.zeros(3)
-        self.current_orientation = np.array([1.0, 0.0, 0.0, 0.0])  # w,x,y,z
-        self.current_yaw = 0.0  # Yaw drone saat ini (rad)
         self.pose_received = False
 
         # ===================== PUB / SUB =====================
@@ -95,9 +91,6 @@ class Px4TrajectoryPublisherGated(object):
         )
         self.waypoint_pub = rospy.Publisher(
             "/waypoint/target", PoseStamped, queue_size=10
-        )
-        self.status_pub = rospy.Publisher(
-            "/trajectory/status", String, queue_size=10
         )
 
         self.state_sub = rospy.Subscriber(
@@ -132,16 +125,6 @@ class Px4TrajectoryPublisherGated(object):
             msg.pose.position.y,
             msg.pose.position.z
         ]
-        
-        # Simpan orientation dan extract yaw
-        self.current_orientation = np.array([
-            msg.pose.orientation.w,
-            msg.pose.orientation.x,
-            msg.pose.orientation.y,
-            msg.pose.orientation.z
-        ])
-        _, _, self.current_yaw = self.quaternion_to_euler(self.current_orientation)
-        
         if not self.pose_received:
             self.pose_received = True
             rospy.loginfo("✅ Pose pertama dari /mavros/local_position/pose diterima.")
@@ -174,8 +157,7 @@ class Px4TrajectoryPublisherGated(object):
                     size=self.square_size,
                     altitude=0.0,
                     points_per_side=self.square_points_per_side,
-                    constant_yaw=self.square_constant_yaw,
-                    initial_yaw=self.current_yaw  # Pass current yaw
+                    constant_yaw=self.square_constant_yaw
                 )
             elif self.waypoint_mode == "helix":
                 path = self.generate_helix_waypoints(
@@ -225,14 +207,13 @@ class Px4TrajectoryPublisherGated(object):
                     num_points=self.circle_points
                 )
             elif self.waypoint_mode == "square":
-                waypoints = self.generate_square_waypoints(
+                path = self.generate_square_waypoints(
                     center_n=self.square_center_n,
                     center_e=self.square_center_e,
                     size=self.square_size,
                     altitude=self.square_altitude,
                     points_per_side=self.square_points_per_side,
-                    constant_yaw=self.square_constant_yaw,
-                    initial_yaw=self.current_yaw  # Pass current yaw
+                    constant_yaw=self.square_constant_yaw
                 )
             elif self.waypoint_mode == "helix":
                 path = self.generate_helix_waypoints(
@@ -353,11 +334,6 @@ class Px4TrajectoryPublisherGated(object):
                     t_rel += self.total_time
             else:
                 t_rel = max(0.0, min(t_rel, self.total_time))
-                # Cek jika sudah mencapai akhir trajectory
-                if t_rel >= self.total_time and not self.trajectory_finished:
-                    self.trajectory_finished = True
-                    self.status_pub.publish(String(data="FINISHED"))
-                    rospy.loginfo("🏁 Trajectory FINISHED! Publishing status.")
 
             j = np.searchsorted(self.cum_times, t_rel, side="right") - 1
             j = int(np.clip(j, 0, len(self.segment_times) - 1))
@@ -438,7 +414,7 @@ class Px4TrajectoryPublisherGated(object):
         return waypoints
 
     def generate_square_waypoints(self, center_n=0.0, center_e=0.0, size=40.0,
-                                  altitude=-5.0, points_per_side=3, constant_yaw=True, initial_yaw=0.0):
+                                  altitude=-5.0, points_per_side=3, constant_yaw=True):
         waypoints = []
         half = size / 2.0
 
@@ -469,7 +445,7 @@ class Px4TrajectoryPublisherGated(object):
                 e = start_corner[1] + t * de
 
                 if constant_yaw:
-                    yaw = initial_yaw  # Use drone's current yaw
+                    yaw = 0.0
                 elif t < 0.8:
                     yaw = yaw_current
                 else:
@@ -490,26 +466,6 @@ class Px4TrajectoryPublisherGated(object):
             center_n, center_e, size, -altitude, len(waypoints), yaw_mode
         )
         return waypoints
-
-    def quaternion_to_euler(self, q):
-        """Convert quaternion to euler angles (roll, pitch, yaw)"""
-        w, x, y, z = q
-        
-        sinr_cosp = 2.0*(w*x + y*z)
-        cosr_cosp = 1.0 - 2.0*(x*x + y*y)
-        roll = np.arctan2(sinr_cosp, cosr_cosp)
-        
-        sinp = 2.0*(w*y - z*x)
-        if abs(sinp) >= 1.0:
-            pitch = np.copysign(np.pi/2, sinp)
-        else:
-            pitch = np.arcsin(sinp)
-        
-        siny_cosp = 2.0*(w*z + x*y)
-        cosy_cosp = 1.0 - 2.0*(y*y + z*z)
-        yaw = np.arctan2(siny_cosp, cosy_cosp)
-        
-        return roll, pitch, yaw
 
     def generate_helix_waypoints(self, center_n=0.0, center_e=0.0, radius=1.0,
                                  start_altitude=-10.0, end_altitude=-30.0,

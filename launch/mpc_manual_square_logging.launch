@@ -69,6 +69,4 @@
     <param name="auto_stop_on_finish" value="true"/>
   </node>
 
-  <node pkg="rqt_console" type="rqt_console" name="rqt_console" />
-
 </launch>
