@@ -19,6 +19,7 @@ import numpy as np
 
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from mavros_msgs.msg import State
+from std_msgs.msg import String
 
 
 class Px4TrajectoryPublisherGated(object):
@@ -76,6 +77,10 @@ class Px4TrajectoryPublisherGated(object):
         # Mode internal: "WAIT_ALT" atau "TRACK"
         self.mode = "WAIT_ALT"
         self.alt_ready_since = None
+        
+        # Trajectory completion tracking
+        self.trajectory_finished = False
+        self.finish_published = False
 
         # ===================== STATE MAVROS =====================
         self.current_state = State()
@@ -91,6 +96,9 @@ class Px4TrajectoryPublisherGated(object):
         )
         self.waypoint_pub = rospy.Publisher(
             "/waypoint/target", PoseStamped, queue_size=10
+        )
+        self.status_pub = rospy.Publisher(
+            "/trajectory/status", String, queue_size=10
         )
 
         self.state_sub = rospy.Subscriber(
@@ -334,6 +342,14 @@ class Px4TrajectoryPublisherGated(object):
                     t_rel += self.total_time
             else:
                 t_rel = max(0.0, min(t_rel, self.total_time))
+                # Check if trajectory is finished (reached total_time)
+                if t_rel >= self.total_time and not self.trajectory_finished:
+                    self.trajectory_finished = True
+                    rospy.loginfo("✅ Trajectory FINISHED (reached final waypoint)")
+                
+                # Log progress
+                progress_pct = (t_rel / self.total_time) * 100.0 if self.total_time > 0 else 0.0
+                rospy.loginfo_throttle(2.0, f"🛤️  Trajectory progress: {progress_pct:.1f}% ({t_rel:.1f}s / {self.total_time:.1f}s)")
 
             j = np.searchsorted(self.cum_times, t_rel, side="right") - 1
             j = int(np.clip(j, 0, len(self.segment_times) - 1))
@@ -390,6 +406,14 @@ class Px4TrajectoryPublisherGated(object):
         self.pose_pub.publish(pose_msg)
         self.vel_pub.publish(vel_msg)
         self.waypoint_pub.publish(pose_msg)
+        
+        # Publish trajectory completion status
+        if self.trajectory_finished and not self.finish_published:
+            status_msg = String()
+            status_msg.data = "FINISHED"
+            self.status_pub.publish(status_msg)
+            self.finish_published = True
+            rospy.loginfo("📢 Published trajectory status: FINISHED")
 
     # ======================================================================
     # TRAJECTORY GENERATORS (NED) – sama seperti sebelumnya

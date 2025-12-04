@@ -279,7 +279,7 @@ if __name__ == "__main__":
     run_mpc_benchmark(
         T_sim=60.0,   # durasi simulasi
         dt=0.1,       # harus sama dengan di controller ROS
-        Np=6,
+        Np=10,
         Nc=3,
         print_trajectory_stats=True
     )

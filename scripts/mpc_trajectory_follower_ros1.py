@@ -247,7 +247,7 @@ class MPCTrajectoryFollowerROS1:
         # Trajectory reference (NED)
         self.ref_position = np.array([0.0, 0.0, -2.5])
         self.ref_velocity = np.zeros(3)
-        self.ref_yaw = 0.0
+        self.ref_yaw = -45.0
 
         self.ref_pose_received = False
         self.ref_vel_received = False
