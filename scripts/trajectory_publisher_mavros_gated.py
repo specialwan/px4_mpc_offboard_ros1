@@ -12,6 +12,13 @@ Time-based Trajectory Publisher to PX4 (ROS1 + MAVROS) dengan ALTITUDE GATE
 - Tambahan: altitude gate
   * Selama drone belum stabil di ketinggian hover_altitude → hanya kirim setpoint hover
   * Setelah stabil (mis. 5 m ± 0.3 m selama 2 s) → baru start lintasan time-based
+
+Perubahan pada versi ini:
+- Acceptance detection (horizontal XY + altitude tolerance)
+- Logging dan publish /trajectory/status saat waypoint tercapai: "REACHED i"
+- Opsi advance_on_reach: loncat ke waktu kumulatif waypoint saat reached agar ref langsung lanjut
+- Jika waypoint terakhir tercapai, publish "FINISHED"
+- Mode baru: waypoint_follow_mode (sampai tiap waypoint tercapai baru lanjut ke berikutnya)
 """
 
 import rospy
@@ -38,6 +45,15 @@ class Px4TrajectoryPublisherGated(object):
         self.hover_stable_time = rospy.get_param("~hover_stable_time", 1.0)  # s
         self.gate_on_altitude = rospy.get_param("~gate_on_altitude", True)
 
+        # Acceptance / reach detection (recommended: 2D horizontal + alt tol)
+        self.acceptance_radius_xy = rospy.get_param("~acceptance_radius_xy", 0.8)  # meter
+        self.acceptance_alt_tol = rospy.get_param("~acceptance_alt_tol", 0.5)      # meter (NED down)
+        self.advance_on_reach = rospy.get_param("~advance_on_reach", True)        # jump time to reached waypoint
+
+        # New: waypoint follow (statis per waypoint until reached)
+        self.waypoint_follow_mode = rospy.get_param("~waypoint_follow_mode",True)
+        self.current_wp_idx = 1
+
         # Circle params
         self.circle_center_n = rospy.get_param("~circle_center_n", 0.0)
         self.circle_center_e = rospy.get_param("~circle_center_e", 0.0)
@@ -48,10 +64,10 @@ class Px4TrajectoryPublisherGated(object):
         # Square params
         self.square_center_n = rospy.get_param("~square_center_n", 0.0)
         self.square_center_e = rospy.get_param("~square_center_e", 0.0)
-        self.square_size = rospy.get_param("~square_size", 20.0)
-        self.square_altitude = rospy.get_param("~square_altitude", -5.0)
-        self.square_points_per_side = int(rospy.get_param("~square_points_per_side", 10))
-        self.square_constant_yaw = rospy.get_param("~square_constant_yaw", False)
+        self.square_size = rospy.get_param("~square_size", 15.0)
+        self.square_altitude = rospy.get_param("~square_altitude", -2.5)
+        self.square_points_per_side = int(rospy.get_param("~square_points_per_side", 0))
+        self.square_constant_yaw = rospy.get_param("~square_constant_yaw", True)
 
         # Helix params
         self.helix_center_n = rospy.get_param("~helix_center_n", 0.0)
@@ -81,6 +97,9 @@ class Px4TrajectoryPublisherGated(object):
         # Trajectory completion tracking
         self.trajectory_finished = False
         self.finish_published = False
+
+        # reached flags (inited when build_path dipanggil)
+        self.reached_flags = None
 
         # ===================== STATE MAVROS =====================
         self.current_state = State()
@@ -200,6 +219,14 @@ class Px4TrajectoryPublisherGated(object):
                 wp[1] += de
                 wp[2] = d_hover   # paksa semua titik di ketinggian hover
 
+            # jika titik terakhir sama dengan titik pertama (penutupan loop), hapus duplikat terakhir
+            if len(path) > 1:
+                first = path[0]
+                last = path[-1]
+                # bandingkan N,E, dan altitude (toleransi kecil)
+                if (abs(first[0] - last[0]) < 1e-3) and (abs(first[1] - last[1]) < 1e-3) and (abs(first[2] - last[2]) < 1e-3):
+                    path.pop(-1)
+
             rospy.loginfo(
                 "🚀 Trajectory anchored ke UAV: start NED ≈ (%.2f, %.2f, %.2f)",
                 n_uav, e_uav, d_hover
@@ -247,12 +274,26 @@ class Px4TrajectoryPublisherGated(object):
             path.append(path[0])
 
         self.path_points = path
+
+        # initialize reached flags for each waypoint (to avoid repeated logs)
+        self.reached_flags = [False] * len(self.path_points)
+
+        # Mark the starting point (index 0) as already reached because path anchored there
+        if len(self.path_points) > 0:
+            self.reached_flags[0] = True
+
+        # initialize current waypoint index for waypoint-follow mode
+        self.current_wp_idx = 1
+
         self._precompute_segments()
         self.traj_initialized = True
         self.t0 = rospy.Time.now().to_sec()
 
         self.mode = "WAIT_ALT"
         self.alt_ready_since = None
+
+        self.trajectory_finished = False
+        self.finish_published = False
 
         rospy.loginfo("=" * 60)
         rospy.loginfo("PX4 Trajectory Publisher (time-based, gated)")
@@ -264,6 +305,9 @@ class Px4TrajectoryPublisherGated(object):
         rospy.loginfo("Start at curr pos : %s", "Yes" if self.start_at_current_pose else "No")
         rospy.loginfo("Hover altitude    : %.2f m ENU", self.hover_altitude)
         rospy.loginfo("Altitude gate     : %s", "ON" if self.gate_on_altitude else "OFF")
+        rospy.loginfo("Acceptance XY/Alt : %.2f m / %.2f m", self.acceptance_radius_xy, self.acceptance_alt_tol)
+        rospy.loginfo("advance_on_reach  : %s", "Yes" if self.advance_on_reach else "No")
+        rospy.loginfo("waypoint_follow_mode: %s", "Yes" if self.waypoint_follow_mode else "No")
         rospy.loginfo("Ref topics        : /trajectory/ref_pose, /trajectory/ref_vel, /waypoint/target")
         rospy.loginfo("=" * 60)
 
@@ -342,39 +386,147 @@ class Px4TrajectoryPublisherGated(object):
                     t_rel += self.total_time
             else:
                 t_rel = max(0.0, min(t_rel, self.total_time))
-                # Check if trajectory is finished (reached total_time)
-                if t_rel >= self.total_time and not self.trajectory_finished:
-                    self.trajectory_finished = True
-                    rospy.loginfo("✅ Trajectory FINISHED (reached final waypoint)")
-                
+                # Check trajectory finished ONLY if NOT in waypoint_follow_mode
+                # In waypoint_follow_mode, finish is determined by reaching last waypoint
+                if not self.waypoint_follow_mode:
+                    if t_rel >= self.total_time and not self.trajectory_finished:
+                        self.trajectory_finished = True
+                        rospy.loginfo("✅ Trajectory FINISHED (time-based: reached total_time)")
+                        # publish finished status if not already
+                        if not self.finish_published:
+                            status_msg = String(); status_msg.data = "FINISHED"; self.status_pub.publish(status_msg)
+                            self.finish_published = True
+
                 # Log progress
                 progress_pct = (t_rel / self.total_time) * 100.0 if self.total_time > 0 else 0.0
                 rospy.loginfo_throttle(2.0, f"🛤️  Trajectory progress: {progress_pct:.1f}% ({t_rel:.1f}s / {self.total_time:.1f}s)")
 
-            j = np.searchsorted(self.cum_times, t_rel, side="right") - 1
-            j = int(np.clip(j, 0, len(self.segment_times) - 1))
+            # ------------------- waypoint-follow mode (statis per waypoint) -------------------
+            if self.waypoint_follow_mode:
+                # pastikan indeks valid
+                if self.current_wp_idx >= len(self.positions):
+                    # sudah melewati semua waypoint
+                    p_ref = self.positions[-1].copy()
+                    v_ref_ned = np.zeros(3)
+                    yaw_ref = self.yaws[-1]
+                    self.trajectory_finished = True
+                else:
+                    p_ref = self.positions[self.current_wp_idx].copy()  # NED waypoint target
+                    v_ref_ned = np.zeros(3)  # kita kirim kecepatan nol (controller move to pos)
+                    yaw_ref = self.yaws[self.current_wp_idx]
 
-            t_start = self.cum_times[j]
-            dt_seg = self.segment_times[j]
-            if dt_seg <= 0.0:
-                tau = 0.0
+                # convert current ENU -> NED for reach check
+                if self.pose_received and self.reached_flags is not None:
+                    cur_ned = np.array([self.current_pos_enu[1], self.current_pos_enu[0], -self.current_pos_enu[2]])
+                    wp = self.positions[self.current_wp_idx]
+                    d_xy = float(np.linalg.norm(cur_ned[0:2] - wp[0:2]))
+                    d_z = float(abs(cur_ned[2] - wp[2]))
+
+                    rospy.loginfo_throttle(1.0, f"[WF] wp_idx={self.current_wp_idx}, d_xy={d_xy:.2f}, d_z={d_z:.2f}")
+
+                    if (not self.reached_flags[self.current_wp_idx]) and (d_xy <= self.acceptance_radius_xy) and (d_z <= self.acceptance_alt_tol):
+                        # reached current waypoint
+                        self.reached_flags[self.current_wp_idx] = True
+                        tnow = rospy.Time.now().to_sec()
+                        rospy.loginfo("📍 REACHED waypoint %d (d_xy=%.2f m, d_z=%.2f m) at t=%.2f s", self.current_wp_idx, d_xy, d_z, tnow)
+                        status_msg = String(); status_msg.data = f"REACHED {self.current_wp_idx}"; self.status_pub.publish(status_msg)
+
+                        # jika waypoint terakhir → publish FINISHED
+                        if self.current_wp_idx == (len(self.positions) - 1):
+                            if not self.finish_published:
+                                status_finish = String(); status_finish.data = "FINISHED"; self.status_pub.publish(status_finish)
+                                self.finish_published = True
+                                self.trajectory_finished = True
+                                rospy.loginfo("📢 Trajectory FINISHED by reach on last waypoint")
+                            # JANGAN increment lagi, stay di waypoint terakhir
+                        else:
+                            # advance index ke waypoint berikutnya (hanya jika bukan waypoint terakhir)
+                            self.current_wp_idx += 1
+
+                            # jika advance_on_reach aktif, update t0 agar consistent (opsional)
+                            if self.advance_on_reach:
+                                # set t0 supaya t_rel >= cum_times[current_wp_idx-1]
+                                idx_for_time = min(self.current_wp_idx, len(self.cum_times)-1)
+                                desired_t_rel = float(self.cum_times[idx_for_time])
+                                self.t0 = rospy.Time.now().to_sec() - desired_t_rel
+                                rospy.loginfo("⏩ advance_on_reach aktif — loncat ke waktu kumulatif %.2f s", desired_t_rel)
+
             else:
-                tau = (t_rel - t_start) / dt_seg
-                tau = float(np.clip(tau, 0.0, 1.0))
+                # ------------------- TIME-BASED MODE (existing behavior) -------------------
+                j = np.searchsorted(self.cum_times, t_rel, side="right") - 1
+                j = int(np.clip(j, 0, len(self.segment_times) - 1))
 
-            p0 = self.positions[j]
-            p1 = self.positions[j + 1]
-            p_ref = (1.0 - tau) * p0 + tau * p1
+                t_start = self.cum_times[j]
+                dt_seg = self.segment_times[j]
+                if dt_seg <= 0.0:
+                    tau = 0.0
+                else:
+                    tau = (t_rel - t_start) / dt_seg
+                    tau = float(np.clip(tau, 0.0, 1.0))
 
-            yaw0 = self.yaws[j]
-            yaw1 = self.yaws[j + 1]
-            yaw_diff = np.arctan2(np.sin(yaw1 - yaw0), np.cos(yaw1 - yaw0))
-            yaw_ref = yaw0 + tau * yaw_diff
+                p0 = self.positions[j]
+                p1 = self.positions[j + 1]
+                p_ref = (1.0 - tau) * p0 + tau * p1
 
-            dp = p1 - p0
-            seg_len = self.segment_lengths[j]
-            dir_vec = dp / max(seg_len, 1e-6)
-            v_ref_ned = dir_vec * self.ref_speed
+                yaw0 = self.yaws[j]
+                yaw1 = self.yaws[j + 1]
+                yaw_diff = np.arctan2(np.sin(yaw1 - yaw0), np.cos(yaw1 - yaw0))
+                yaw_ref = yaw0 + tau * yaw_diff
+
+                dp = p1 - p0
+                seg_len = self.segment_lengths[j]
+                dir_vec = dp / max(seg_len, 1e-6)
+                v_ref_ned = dir_vec * self.ref_speed
+                # ------------------------- reach detection (scan all remaining waypoints) -------------------------
+                # convert current ENU -> NED for reach check
+                if self.pose_received and self.reached_flags is not None:
+                    cur_ned = np.array([self.current_pos_enu[1], self.current_pos_enu[0], -self.current_pos_enu[2]])
+
+                    # use a safe index for checking (clamp to last if current_wp_idx out of range)
+                    safe_idx = min(self.current_wp_idx, len(self.positions) - 1)
+
+                    wp = self.positions[safe_idx]
+                    d_xy = float(np.linalg.norm(cur_ned[0:2] - wp[0:2]))
+                    d_z = float(abs(cur_ned[2] - wp[2]))
+
+                    rospy.loginfo_throttle(1.0, f"[WF] wp_idx={self.current_wp_idx}, safe_idx={safe_idx}, d_xy={d_xy:.2f}, d_z={d_z:.2f}")
+
+                    # only treat as reaching the "current" wp if current_wp_idx is within bounds
+                    if self.current_wp_idx < len(self.positions):
+                        if (not self.reached_flags[self.current_wp_idx]) and (d_xy <= self.acceptance_radius_xy) and (d_z <= self.acceptance_alt_tol):
+                            # reached current waypoint
+                            self.reached_flags[self.current_wp_idx] = True
+                            tnow = rospy.Time.now().to_sec()
+                            rospy.loginfo("📍 REACHED waypoint %d (d_xy=%.2f m, d_z=%.2f m) at t=%.2f s", self.current_wp_idx, d_xy, d_z, tnow)
+                            status_msg = String(); status_msg.data = f"REACHED {self.current_wp_idx}"; self.status_pub.publish(status_msg)
+
+                            # jika waypoint terakhir → publish FINISHED
+                            if self.current_wp_idx == (len(self.positions) - 1):
+                                if not self.finish_published:
+                                    status_finish = String(); status_finish.data = "FINISHED"; self.status_pub.publish(status_finish)
+                                    self.finish_published = True
+                                    self.trajectory_finished = True
+                                    rospy.loginfo("📢 Trajectory FINISHED by reach on last waypoint")
+
+                            # advance index ke waypoint berikutnya (safely)
+                            self.current_wp_idx += 1
+
+                            # clamp and handle if we've passed the last waypoint
+                            if self.current_wp_idx >= len(self.positions):
+                                # semua waypoint telah dicapai — set ke last index dan mark finished
+                                self.current_wp_idx = len(self.positions) - 1
+                                self.trajectory_finished = True
+                                if not self.finish_published:
+                                    status_finish = String(); status_finish.data = "FINISHED"; self.status_pub.publish(status_finish)
+                                    self.finish_published = True
+                                rospy.loginfo("All waypoints reached, stopping waypoint-follow.")
+
+                            # jika advance_on_reach aktif, update t0 agar consistent (opsional)
+                            if self.advance_on_reach:
+                                idx_for_time = min(self.current_wp_idx, len(self.cum_times)-1)
+                                desired_t_rel = float(self.cum_times[idx_for_time])
+                                self.t0 = rospy.Time.now().to_sec() - desired_t_rel
+                                rospy.loginfo("⏩ advance_on_reach aktif — loncat ke waktu kumulatif %.2f s", desired_t_rel)
 
             # NED → ENU
             enu_pos = np.array([p_ref[1], p_ref[0], -p_ref[2]])
@@ -407,7 +559,7 @@ class Px4TrajectoryPublisherGated(object):
         self.vel_pub.publish(vel_msg)
         self.waypoint_pub.publish(pose_msg)
         
-        # Publish trajectory completion status
+        # Publish trajectory completion status (redundant guard)
         if self.trajectory_finished and not self.finish_published:
             status_msg = String()
             status_msg.data = "FINISHED"

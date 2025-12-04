@@ -1,99 +1,84 @@
+<!--
+Launch file untuk px4_trajectory_publisher_gated (ROS1)
+
+Cara pakai:
+  roslaunch <your_package> px4_trajectory_publisher_gated.launch
+
+Override parameter dari command line:
+  roslaunch <your_package> px4_trajectory_publisher_gated.launch waypoint_mode:=square \ 
+    square_points_per_side:=0 ref_speed:=1.0 acceptance_radius_xy:=1.5 acceptance_alt_tol:=0.8
+
+Ganti <your_package> dengan nama package ROS kamu yang berisi file Python node.
+-->
+
 <launch>
-  <!--
-    PX4 Time-based Trajectory Publisher (with altitude gate)
 
-    Asumsi:
-    - MAVROS sudah dijalankan terpisah (mavros.launch)
-    - Frame lokal PX4: "map" / "local_origin"
-  -->
+  <!-- Argumen (default) -->
+  <arg name="waypoint_mode" default="square" />
+  <arg name="ref_speed" default="2.0" />
+  <arg name="loop_trajectory" default="false" />
+  <arg name="start_at_current_pose" default="true" />
 
-  <!-- ==== PARAMETER UTAMA ==== -->
-  <!-- mode lintasan: default | circle | square | helix -->
-  <arg name="waypoint_mode"          default="square"/>
+  <!-- Hover / gate -->
+  <arg name="hover_altitude" default="2.5" />
+  <arg name="alt_tolerance" default="0.3" />
+  <arg name="hover_stable_time" default="1.0" />
+  <arg name="gate_on_altitude" default="true" />
 
-  <!-- kecepatan referensi di sepanjang lintasan (m/s) -->
-  <arg name="ref_speed"              default="2.0"/>
+  <!-- Square params -->
+  <arg name="square_center_n" default="0.0" />
+  <arg name="square_center_e" default="0.0" />
+  <arg name="square_size" default="15.0" />
+  <arg name="square_altitude" default="-2.5" />
+  <arg name="square_points_per_side" default="0" />
+  <arg name="square_constant_yaw" default="true" />
 
-  <!-- apakah lintasan di-loop terus -->
-  <arg name="loop_trajectory"        default="false"/>
+  <!-- Acceptance / reach detection -->
+  <arg name="acceptance_radius_xy" default="0.8" />
+  <arg name="acceptance_alt_tol" default="0.5" />
+  <arg name="advance_on_reach" default="true" />
 
-  <!-- true: path di-anchor ke posisi drone saat pose pertama diterima -->
-  <arg name="start_at_current_pose"  default="true"/>
+  <!-- Helix / Circle (optional overrides) -->
+  <arg name="circle_radius" default="10.0" />
+  <arg name="circle_points" default="80" />
+  <arg name="helix_radius" default="1.0" />
+  <arg name="helix_points" default="120" />
 
-  <!-- ==== ALTITUDE GATE ==== -->
-  <!-- ketinggian hover sebelum mulai jalan lintasan (ENU, +up) -->
-  <arg name="hover_altitude"         default="2.5"/>
-  <!-- toleransi ketinggian agar dianggap sudah di hover (m) -->
-  <arg name="alt_tolerance"          default="0.3"/>
-  <!-- berapa lama harus berada di dalam window ketinggian (s) -->
-  <arg name="hover_stable_time"      default="2.0"/>
-  <!-- kalau mau langsung jalan tanpa nunggu hover: set false -->
-  <arg name="gate_on_altitude"       default="true"/>
+  <!-- Package & executable: GANTI `your_package` dengan nama package-mu -->
+  <arg name="pkg" default="mpc_offboard" />
+  <arg name="node_exec" default="trajectory_publisher_mavros_gated.py" />
 
-  <!-- ==== PARAMETER LINTASAN CIRCLE (jika waypoint_mode=circle) ==== -->
-  <arg name="circle_center_n"        default="0.0"/>
-  <arg name="circle_center_e"        default="0.0"/>
-  <arg name="circle_radius"          default="10.0"/>
-  <!-- altitude NED (negatif ke bawah) - tidak terlalu penting,
-       karena untuk start_at_current_pose=true akan dipaksa ke -hover_altitude -->
-  <arg name="circle_altitude"        default="-5.0"/>
-  <arg name="circle_points"          default="80"/>
+  <!-- Parameter settings -->
+  <param name="waypoint_mode" value="$(arg waypoint_mode)" />
+  <param name="ref_speed" value="$(arg ref_speed)" />
+  <param name="loop_trajectory" value="$(arg loop_trajectory)" />
+  <param name="start_at_current_pose" value="$(arg start_at_current_pose)" />
 
-  <!-- ==== PARAMETER LINTASAN SQUARE (jika waypoint_mode=square) ==== -->
-  <arg name="square_center_n"        default="0.0"/>
-  <arg name="square_center_e"        default="0.0"/>
-  <arg name="square_size"            default="15.0"/>
-  <arg name="square_altitude"        default="-2.5"/> 
-  <arg name="square_points_per_side" default="10"/>
-  <arg name="square_constant_yaw"    default="true"/>
+  <param name="hover_altitude" value="$(arg hover_altitude)" />
+  <param name="alt_tolerance" value="$(arg alt_tolerance)" />
+  <param name="hover_stable_time" value="$(arg hover_stable_time)" />
+  <param name="gate_on_altitude" value="$(arg gate_on_altitude)" />
 
-  <!-- ==== PARAMETER LINTASAN HELIX (jika waypoint_mode=helix) ==== -->
-  <arg name="helix_center_n"         default="0.0"/>
-  <arg name="helix_center_e"         default="0.0"/>
-  <arg name="helix_radius"           default="1.0"/>
-  <arg name="helix_start_altitude"   default="-10.0"/>
-  <arg name="helix_end_altitude"     default="-30.0"/>
-  <arg name="helix_turns"            default="3.0"/>
-  <arg name="helix_points"           default="120"/>
+  <param name="square_center_n" value="$(arg square_center_n)" />
+  <param name="square_center_e" value="$(arg square_center_e)" />
+  <param name="square_size" value="$(arg square_size)" />
+  <param name="square_altitude" value="$(arg square_altitude)" />
+  <param name="square_points_per_side" value="$(arg square_points_per_side)" />
+  <param name="square_constant_yaw" value="$(arg square_constant_yaw)" />
 
-  <!-- ==== NODE TRAJECTORY PUBLISHER GATED ==== -->
-  <node name="trajectory_publisher_mavros_gated"
-        pkg="mpc_offboard"
-        type="trajectory_publisher_mavros_gated.py"
-        output="screen">
+  <param name="acceptance_radius_xy" value="$(arg acceptance_radius_xy)" />
+  <param name="acceptance_alt_tol" value="$(arg acceptance_alt_tol)" />
+  <param name="advance_on_reach" value="$(arg advance_on_reach)" />
 
-    <!-- Kirim semua arg sebagai parameter private (~param) -->
-    <param name="waypoint_mode"          value="$(arg waypoint_mode)"/>
-    <param name="ref_speed"              value="$(arg ref_speed)"/>
-    <param name="loop_trajectory"        value="$(arg loop_trajectory)"/>
-    <param name="start_at_current_pose"  value="$(arg start_at_current_pose)"/>
+  <param name="circle_radius" value="$(arg circle_radius)" />
+  <param name="circle_points" value="$(arg circle_points)" />
+  <param name="helix_radius" value="$(arg helix_radius)" />
+  <param name="helix_points" value="$(arg helix_points)" />
 
-    <param name="hover_altitude"         value="$(arg hover_altitude)"/>
-    <param name="alt_tolerance"          value="$(arg alt_tolerance)"/>
-    <param name="hover_stable_time"      value="$(arg hover_stable_time)"/>
-    <param name="gate_on_altitude"       value="$(arg gate_on_altitude)"/>
-
-    <param name="circle_center_n"        value="$(arg circle_center_n)"/>
-    <param name="circle_center_e"        value="$(arg circle_center_e)"/>
-    <param name="circle_radius"          value="$(arg circle_radius)"/>
-    <param name="circle_altitude"        value="$(arg circle_altitude)"/>
-    <param name="circle_points"          value="$(arg circle_points)"/>
-
-    <param name="square_center_n"        value="$(arg square_center_n)"/>
-    <param name="square_center_e"        value="$(arg square_center_e)"/>
-    <param name="square_size"            value="$(arg square_size)"/>
-    <param name="square_altitude"        value="$(arg square_altitude)"/>
-    <param name="square_points_per_side" value="$(arg square_points_per_side)"/>
-    <param name="square_constant_yaw"    value="$(arg square_constant_yaw)"/>
-
-    <param name="helix_center_n"         value="$(arg helix_center_n)"/>
-    <param name="helix_center_e"         value="$(arg helix_center_e)"/>
-    <param name="helix_radius"           value="$(arg helix_radius)"/>
-    <param name="helix_start_altitude"   value="$(arg helix_start_altitude)"/>
-    <param name="helix_end_altitude"     value="$(arg helix_end_altitude)"/>
-    <param name="helix_turns"            value="$(arg helix_turns)"/>
-    <param name="helix_points"           value="$(arg helix_points)"/>
-
+  <!-- Node -->
+  <node pkg="$(arg pkg)" type="$(arg node_exec)" name="trajectory_publisher_mavros_gated" output="screen">
+    <!-- If the script is not executable, you can run via rosrun-style python: -->
+    <!-- <rosparam> not needed because we already set params above -->
   </node>
 
 </launch>

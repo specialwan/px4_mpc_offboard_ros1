@@ -21,13 +21,24 @@
   <arg name="hover_stable_time"      default="2.0"/>
   <arg name="gate_on_altitude"       default="true"/>
 
+  <!-- Acceptance / reach detection -->
+  <arg name="acceptance_radius_xy"   default="0.8"/>
+  <arg name="acceptance_alt_tol"     default="0.5"/>
+  <arg name="advance_on_reach"       default="true"/>
+  
+  <!-- Waypoint follow mode -->
+  <arg name="waypoint_follow_mode"   default="true"/>
+
   <!-- Square parameters -->
   <arg name="square_center_n"        default="0.0"/>
   <arg name="square_center_e"        default="0.0"/>
-  <arg name="square_size"            default="15.0"/>
+  <arg name="square_size"            default="10.0"/>
   <arg name="square_altitude"        default="-2.5"/>
-  <arg name="square_points_per_side" default="10"/>
+  <arg name="square_points_per_side" default="0"/>
   <arg name="square_constant_yaw"    default="true"/>
+
+  <!-- Data logger -->
+  <arg name="auto_stop_on_finish"    default="true"/>
 
   <!-- ==== NODE 1: TRAJECTORY PUBLISHER GATED ==== -->
   <node name="trajectory_publisher_mavros_gated"
@@ -44,6 +55,11 @@
     <param name="alt_tolerance"          value="$(arg alt_tolerance)"/>
     <param name="hover_stable_time"      value="$(arg hover_stable_time)"/>
     <param name="gate_on_altitude"       value="$(arg gate_on_altitude)"/>
+    
+    <param name="acceptance_radius_xy"   value="$(arg acceptance_radius_xy)"/>
+    <param name="acceptance_alt_tol"     value="$(arg acceptance_alt_tol)"/>
+    <param name="advance_on_reach"       value="$(arg advance_on_reach)"/>
+    <param name="waypoint_follow_mode"   value="$(arg waypoint_follow_mode)"/>
     
     <param name="square_center_n"        value="$(arg square_center_n)"/>
     <param name="square_center_e"        value="$(arg square_center_e)"/>
@@ -66,7 +82,7 @@
         type="data_logger_mavros_traj.py"
         output="screen">
     <!-- Auto stop saat trajectory selesai -->
-    <param name="auto_stop_on_finish" value="true"/>
+    <param name="auto_stop_on_finish" value="$(arg auto_stop_on_finish)"/>
   </node>
 
 </launch>
