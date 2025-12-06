@@ -65,7 +65,7 @@ class MPCPositionController:
         # Cost matrices - SAFE MODE REAL FLIGHT
         self.Q = np.diag([
             70.0, 70.0, 150.0,   # posisi
-            12.0, 12.0, 90.0     # kecepatan
+            6.0, 6.0, 40.0     # kecepatan
         ])
 
         self.R = np.diag([0.12, 0.12, 0.04])     # penalti besarnya u
