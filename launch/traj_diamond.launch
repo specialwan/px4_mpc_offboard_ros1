@@ -1,0 +1,38 @@
+<launch>
+  <!-- Trajectory Publisher: Diamond Ascending -->
+  <node pkg="mpc_offboard"
+        type="trajectory_publisher_mavros_gated.py"
+        name="px4_trajectory_publisher_gated"
+        output="screen">
+
+    <!-- Mode & umum -->
+    <param name="waypoint_mode"          value="diamond" />
+    <param name="ref_speed"              value="2.0" />
+    <param name="loop_trajectory"        value="false" />
+    <param name="start_at_current_pose"  value="true" />
+
+    <!-- Hover & altitude gate -->
+    <param name="hover_altitude"         value="5.0" />
+    <param name="alt_tolerance"          value="0.3" />
+    <param name="hover_stable_time"      value="1.0" />
+    <param name="gate_on_altitude"       value="true" />
+
+    <!-- Diamond params -->
+    <param name="diamond_center_n"         value="0.0" />
+    <param name="diamond_center_e"         value="0.0" />
+    <param name="diamond_size"             value="7.5" />  <!-- Jarak dari center ke corner (meter) -->
+    <!-- NED altitudes (negative = up): start at 5m, end at 10m -->
+    <param name="diamond_start_altitude"   value="-5.0" />   <!-- -5m NED = 5m above ground -->
+    <param name="diamond_end_altitude"     value="-10.0" />  <!-- -10m NED = 10m above ground -->
+    <param name="diamond_points_per_side"  value="0" />     <!-- Jumlah waypoint per sisi -->
+
+    <!-- Acceptance & advance -->
+    <param name="acceptance_radius_xy"   value="0.8" />
+    <param name="acceptance_alt_tol"     value="0.5" />
+    <param name="advance_on_reach"       value="true" />
+    
+    <!-- Waypoint follow mode -->
+    <param name="waypoint_follow_mode"   value="true" />  <!-- false = trajectory tracking kontinyu -->
+
+  </node>
+</launch>

@@ -1,0 +1,76 @@
+<launch>
+  <!--
+    Launch file untuk menjalankan:
+    1. Trajectory Publisher PX4 Direct (custom waypoints)
+    2. Data Logger MAVROS Traj (logging)
+    
+    Mode: Waypoint diskrit dengan altitude bervariasi (BUKAN helix!)
+    Output: /mavros/setpoint_position/local
+    
+    Penggunaan:
+    roslaunch mpc_offboard px4_direct_waypoints_logging.launch
+  -->
+
+  <!-- ==== PARAMETER TRAJECTORY ==== -->
+  <arg name="waypoint_mode"          default="default"/>
+  <arg name="ref_speed"              default="2.0"/>
+  <arg name="loop_trajectory"        default="false"/>
+  <arg name="start_at_current_pose"  default="true"/>
+
+  <!-- Altitude gate -->
+  <arg name="hover_altitude"         default="5.0"/>
+  <arg name="alt_tolerance"          default="0.3"/>
+  <arg name="hover_stable_time"      default="2.0"/>
+  <arg name="gate_on_altitude"       default="true"/>
+
+  <!-- Acceptance / reach detection -->
+  <arg name="acceptance_radius_xy"   default="0.8"/>
+  <arg name="acceptance_alt_tol"     default="0.5"/>
+  <arg name="advance_on_reach"       default="true"/>
+  
+  <!-- Waypoint follow mode -->
+  <arg name="waypoint_follow_mode"   default="true"/>
+
+  <!-- Auto ARM / OFFBOARD -->
+  <arg name="auto_arm"               default="true"/>
+  <arg name="auto_offboard"          default="true"/>
+
+  <!-- Data logger -->
+  <arg name="auto_stop_on_finish"    default="true"/>
+  <arg name="waypoint_fresh_duration" default="2.0"/>
+
+  <!-- ==== NODE 1: TRAJECTORY PUBLISHER PX4 DIRECT ==== -->
+  <node name="trajectory_publisher_px4_direct"
+        pkg="mpc_offboard"
+        type="trajectory_publisher_px4_direct.py"
+        output="screen">
+    
+    <param name="waypoint_mode"          value="$(arg waypoint_mode)"/>
+    <param name="ref_speed"              value="$(arg ref_speed)"/>
+    <param name="loop_trajectory"        value="$(arg loop_trajectory)"/>
+    <param name="start_at_current_pose"  value="$(arg start_at_current_pose)"/>
+    
+    <param name="hover_altitude"         value="$(arg hover_altitude)"/>
+    <param name="alt_tolerance"          value="$(arg alt_tolerance)"/>
+    <param name="hover_stable_time"      value="$(arg hover_stable_time)"/>
+    <param name="gate_on_altitude"       value="$(arg gate_on_altitude)"/>
+    
+    <param name="acceptance_radius_xy"   value="$(arg acceptance_radius_xy)"/>
+    <param name="acceptance_alt_tol"     value="$(arg acceptance_alt_tol)"/>
+    <param name="advance_on_reach"       value="$(arg advance_on_reach)"/>
+    <param name="waypoint_follow_mode"   value="$(arg waypoint_follow_mode)"/>
+    
+    <param name="auto_arm"               value="$(arg auto_arm)"/>
+    <param name="auto_offboard"          value="$(arg auto_offboard)"/>
+  </node>
+
+  <!-- ==== NODE 2: DATA LOGGER MAVROS TRAJ ==== -->
+  <!-- <node name="data_logger_mavros_traj"
+        pkg="mpc_offboard"
+        type="data_logger_mavros_traj.py"
+        output="screen">
+    <param name="auto_stop_on_finish" value="$(arg auto_stop_on_finish)"/>
+    <param name="waypoint_fresh_duration" value="$(arg waypoint_fresh_duration)"/>
+  </node> -->
+
+</launch>

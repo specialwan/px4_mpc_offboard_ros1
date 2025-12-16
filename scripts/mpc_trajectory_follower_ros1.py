@@ -59,7 +59,7 @@ class MPCPositionController:
 
         # Cost matrices - SAFE MODE REAL FLIGHT
         self.Q = np.diag([
-            10.0, 10.0, 180.0,   # posisi
+            70.0, 70.0, 180.0,   # posisi
             12.0, 12.0, 90.0     # kecepatan
         ])
 
@@ -67,7 +67,7 @@ class MPCPositionController:
         self.R_delta = np.diag([0.15, 0.15, 0.15])  # penalti perubahan u
 
         self.u_prev = np.zeros(self.nu)
-        self.a_max = 10.0  # m/s^2
+        self.a_max = 4.0  # m/s^2
 
         self._build_prediction_matrices()
 
@@ -247,7 +247,7 @@ class MPCTrajectoryFollowerROS1:
         # Trajectory reference (NED)
         self.ref_position = np.array([0.0, 0.0, -2.5])
         self.ref_velocity = np.zeros(3)
-        self.ref_yaw = -45.0
+        self.ref_yaw = 0.0
 
         self.ref_pose_received = False
         self.ref_vel_received = False

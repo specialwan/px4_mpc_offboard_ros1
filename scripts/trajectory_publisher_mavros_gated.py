@@ -78,6 +78,14 @@ class Px4TrajectoryPublisherGated(object):
         self.helix_turns = rospy.get_param("~helix_turns", 3.0)
         self.helix_points = int(rospy.get_param("~helix_points", 120))
 
+        # Diamond ascending params
+        self.diamond_center_n = rospy.get_param("~diamond_center_n", 0.0)
+        self.diamond_center_e = rospy.get_param("~diamond_center_e", 0.0)
+        self.diamond_size = rospy.get_param("~diamond_size", 7.5)
+        self.diamond_start_altitude = rospy.get_param("~diamond_start_altitude", -5.0)
+        self.diamond_end_altitude = rospy.get_param("~diamond_end_altitude", -10.0)
+        self.diamond_points_per_side = int(rospy.get_param("~diamond_points_per_side", 20))
+
         # ===================== STATE TRAJECTORY =====================
         self.positions = None  # NED (N,E,D)
         self.yaws = None
@@ -104,6 +112,7 @@ class Px4TrajectoryPublisherGated(object):
         # ===================== STATE MAVROS =====================
         self.current_state = State()
         self.current_pos_enu = np.zeros(3)
+        self.current_yaw = 0.0  # Current heading/yaw dari drone (rad, ENU frame)
         self.pose_received = False
 
         # ===================== PUB / SUB =====================
@@ -196,6 +205,16 @@ class Px4TrajectoryPublisherGated(object):
                     turns=self.helix_turns,
                     num_points=self.helix_points
                 )
+            elif self.waypoint_mode == "diamond":
+                path = self.generate_diamond_ascending_waypoints(
+                    center_n=0.0,
+                    center_e=0.0,
+                    size=self.diamond_size,
+                    start_altitude=0.0,
+                    end_altitude=self.diamond_end_altitude - self.diamond_start_altitude,
+                    num_points_per_side=self.diamond_points_per_side,
+                    initial_yaw=self.current_yaw
+                )
             else:
                 path = [
                     [0.0, 0.0, 0.0, 0.0],
@@ -210,14 +229,29 @@ class Px4TrajectoryPublisherGated(object):
             e_uav = self.current_pos_enu[0]
             d_hover = -self.hover_altitude  # NED (down)
 
-            first_n, first_e, _, _ = path[0]
+            first_n, first_e, first_d, _ = path[0]
             dn = n_uav - first_n
             de = e_uav - first_e
+            
+            rospy.loginfo("Anchoring path to UAV position:")
+            rospy.loginfo("  UAV: N=%.2f, E=%.2f, D=%.2f", n_uav, e_uav, d_hover)
+            rospy.loginfo("  First waypoint (before anchor): N=%.2f, E=%.2f, D=%.2f", first_n, first_e, first_d)
+            rospy.loginfo("  Offset: dN=%.2f, dE=%.2f", dn, de)
+            
+            # Untuk helix dan diamond, offset altitude dari first waypoint
+            # Untuk mode lain (circle/square), paksa ke hover_altitude
+            if self.waypoint_mode == "helix" or self.waypoint_mode == "diamond":
+                dd = d_hover - first_d  # offset vertikal dari titik pertama
+            else:
+                dd = 0.0  # tidak offset, akan di-set ke d_hover
 
             for wp in path:
                 wp[0] += dn
                 wp[1] += de
-                wp[2] = d_hover   # paksa semua titik di ketinggian hover
+                if self.waypoint_mode == "helix" or self.waypoint_mode == "diamond":
+                    wp[2] += dd   # offset altitude (preserve relative changes)
+                else:
+                    wp[2] = d_hover   # paksa circle/square ke ketinggian hover
 
             # jika titik terakhir sama dengan titik pertama (penutupan loop), hapus duplikat terakhir
             if len(path) > 1:
@@ -259,6 +293,15 @@ class Px4TrajectoryPublisherGated(object):
                     end_altitude=self.helix_end_altitude,
                     turns=self.helix_turns,
                     num_points=self.helix_points
+                )
+            elif self.waypoint_mode == "diamond":
+                path = self.generate_diamond_ascending_waypoints(
+                    center_n=self.diamond_center_n,
+                    center_e=self.diamond_center_e,
+                    size=self.diamond_size,
+                    start_altitude=self.diamond_start_altitude,
+                    end_altitude=self.diamond_end_altitude,
+                    num_points_per_side=self.diamond_points_per_side
                 )
             else:
                 path = [
@@ -676,6 +719,135 @@ class Px4TrajectoryPublisherGated(object):
             "  Turns: %.1f, Points: %d helix + %d transition",
             turns, num_points, transition_count
         )
+        return waypoints
+
+    def generate_diamond_ascending_waypoints(self, center_n=0.0, center_e=0.0, 
+                                            size=15.0, start_altitude=-5.0, 
+                                            end_altitude=-10.0, num_points_per_side=20,
+                                            initial_yaw=0.0):
+        """
+        Generate diamond/belah ketupat trajectory dengan altitude naik gradual.
+        
+        Diamond shape (dilihat dari atas, untuk yaw=0/North):
+        
+                    WP1 (North/Depan)
+                   /              \
+                  /                \
+           WP4 (West/Kiri)    WP2 (East/Kanan)
+                  \                /
+                   \              /
+                    WP3 (South/Belakang)
+        
+        Urutan: Start(center) → WP1(N) → WP2(E) → WP3(S) → WP4(W) → WP5(N/kembali)
+        
+        Altitude naik secara linear dari start_altitude ke end_altitude
+        Yaw mengikuti arah lintasan (tangent vector ke waypoint berikutnya)
+        
+        Args:
+            center_n, center_e: Center position dalam NED
+            size: Jarak dari center ke corner (meter)
+            start_altitude: Altitude awal dalam NED (negative = up)
+            end_altitude: Altitude akhir dalam NED
+            num_points_per_side: Jumlah waypoint per sisi (0 = hanya corners)
+            initial_yaw: Yaw drone saat ini (rad, ENU frame) - untuk rotasi diamond
+        """
+        waypoints = []
+        
+        # Define 4 corners dalam NED frame (untuk yaw=0, facing North):
+        # North = +N, East = +E, South = -N, West = -E
+        # Diamond TIDAK dirotasi - selalu fixed di N/E/S/W
+        # Urutan: N → W → S → E (counter-clockwise)
+        corners_world = [
+            [size, 0.0],      # WP1: North (depan)
+            [0.0, size],     # WP2: West (kiri)
+            [-size, 0.0],     # WP3: South (belakang)
+            [0.0, -size],      # WP4: East (kanan)
+        ]
+        
+        # Jika num_points_per_side == 0, hanya generate corner points + kembali ke start
+        if num_points_per_side == 0:
+            # 5 waypoints: 4 corners + kembali ke corner 1
+            # Altitude increment: dari start ke end dalam 4 steps
+            altitude_step = (end_altitude - start_altitude) / 4.0  # 5 points, 4 intervals
+            
+            for i in range(5):  # 0, 1, 2, 3, 4
+                corner_idx = i % 4  # Loop back to first corner at i=4
+                corner = corners_world[corner_idx]
+                
+                n = center_n + corner[0]
+                e = center_e + corner[1]
+                d = start_altitude + i * altitude_step
+                
+                # Yaw menghadap ke arah KEBERANGKATAN ke corner berikutnya
+                next_corner_idx = (corner_idx - 1) % 4
+                next_corner = corners_world[next_corner_idx]
+                
+                dn = corner[0] - next_corner[0]
+                de = corner[1] - next_corner[1]
+                
+                yaw = float(np.arctan2(de, dn))
+                
+                waypoints.append([float(n), float(e), float(d), yaw])
+                
+                # Debug logging
+                rospy.loginfo("  WP%d: N=%.2f, E=%.2f, D=%.2f (alt=%.1fm), yaw=%.1f°", 
+                             i+1, n, e, d, -d, np.degrees(yaw))
+            
+            rospy.loginfo("Diamond ascending trajectory (point-to-point):")
+            rospy.loginfo("  Center: (%.1f, %.1f) m", center_n, center_e)
+            rospy.loginfo("  Size: %.1f m (center to corner)", size)
+            rospy.loginfo(
+                "  Altitude: %.1f → %.1f m (Δ=%.1f m per waypoint)",
+                -start_altitude, -end_altitude, -(end_altitude - start_altitude) / 4.0
+            )
+            rospy.loginfo("  Total points: %d (4 corners + return to start)", len(waypoints))
+            rospy.loginfo("  Yaw: pointing to next corner, rotated by %.1f°", np.degrees(initial_yaw))
+            
+            return waypoints
+        
+        # Else: generate interpolated points along each side
+        total_points = num_points_per_side * 4
+        altitude_step = (end_altitude - start_altitude) / float(total_points - 1) if total_points > 1 else 0.0
+        
+        point_idx = 0
+        
+        # Generate waypoints for each side
+        for side_idx in range(4):
+            corner_start = corners_world[side_idx]
+            corner_end = corners_world[(side_idx + 1) % 4]
+            
+            # Calculate yaw for this side (direction from start to end)
+            dn = corner_end[0] - corner_start[0]
+            de = corner_end[1] - corner_start[1]
+            side_yaw = float(np.arctan2(de, dn))
+            
+            # Generate points along this side
+            for i in range(num_points_per_side):
+                # Interpolate position along the side
+                t = float(i) / float(num_points_per_side)
+                n = center_n + (1 - t) * corner_start[0] + t * corner_end[0]
+                e = center_e + (1 - t) * corner_start[1] + t * corner_end[1]
+                
+                # Linear altitude increase
+                d = start_altitude + point_idx * altitude_step
+                
+                waypoints.append([float(n), float(e), float(d), side_yaw])
+                point_idx += 1
+        
+        total_height = abs(end_altitude - start_altitude)
+        direction = "descending" if end_altitude < start_altitude else "ascending"
+        
+        rospy.loginfo("Diamond ascending trajectory (interpolated):")
+        rospy.loginfo("  Center: (%.1f, %.1f) m", center_n, center_e)
+        rospy.loginfo("  Size: %.1f m (center to corner)", size)
+        rospy.loginfo(
+            "  Altitude: %.1f → %.1f m (%s, Δ=%.1f m)",
+            -start_altitude, -end_altitude, direction, total_height
+        )
+        rospy.loginfo("  Total points: %d (4 sides × %d points/side)", 
+                     len(waypoints), num_points_per_side)
+        rospy.loginfo("  Yaw: following path tangent direction, rotated by %.1f°", np.degrees(initial_yaw))
+        
         return waypoints
 
 

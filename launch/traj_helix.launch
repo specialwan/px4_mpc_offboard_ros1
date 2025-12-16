@@ -1,0 +1,36 @@
+<launch>
+  <!-- Trajectory Publisher: Helix -->
+  <node pkg="mpc_offboard"
+        type="trajectory_publisher_mavros_gated.py"
+        name="px4_trajectory_publisher_gated"
+        output="screen">
+
+    <!-- Mode & umum -->
+    <param name="waypoint_mode"          value="helix" />
+    <param name="ref_speed"              value="1.5" />   <!-- bisa sedikit lebih pelan -->
+    <param name="loop_trajectory"        value="false" />
+    <param name="start_at_current_pose"  value="true" />
+
+    <!-- Hover & altitude gate -->
+    <param name="hover_altitude"         value="5.0" />
+    <param name="alt_tolerance"          value="0.3" />
+    <param name="hover_stable_time"      value="1.0" />
+    <param name="gate_on_altitude"       value="true" />
+
+    <!-- Helix params -->
+    <param name="helix_center_n"         value="0.0" />
+    <param name="helix_center_e"         value="0.0" />
+    <param name="helix_radius"           value="7.5" />
+    <!-- NED altitudes (negative = up): start at 5m, end at 15m -->
+    <param name="helix_start_altitude"   value="-5.0" />   <!-- -5m NED = 5m above ground -->
+    <param name="helix_end_altitude"     value="-10.0" />  <!-- -15m NED = 15m above ground -->
+    <param name="helix_turns"            value="1.0" />
+    <param name="helix_points"           value="5.0" />
+
+    <!-- Helix juga murni trajectory tracking -->
+    <param name="waypoint_follow_mode"   value="true" />
+    <param name="acceptance_radius_xy"   value="0.8" />
+    <param name="acceptance_alt_tol"     value="0.5" />
+    <param name="advance_on_reach"       value="false" />
+  </node>
+</launch>

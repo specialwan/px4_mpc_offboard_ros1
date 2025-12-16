@@ -1,0 +1,35 @@
+<launch>
+  <!-- Trajectory Publisher: Square 15 m, waypoint-follow -->
+  <node pkg="mpc_offboard"
+        type="trajectory_publisher_mavros_gated.py"
+        name="px4_trajectory_publisher_gated"
+        output="screen">
+
+    <!-- Mode & umum -->
+    <param name="waypoint_mode"          value="square" />
+    <param name="ref_speed"              value="2.0" />
+    <param name="loop_trajectory"        value="false" />
+    <param name="start_at_current_pose"  value="true" />
+
+    <!-- Hover & altitude gate -->
+    <param name="hover_altitude"         value="5.0" />
+    <param name="alt_tolerance"          value="0.3" />
+    <param name="hover_stable_time"      value="1.0" />
+    <param name="gate_on_altitude"       value="true" />
+
+    <!-- Square params: ukuran sama dengan implementasi -->
+    <param name="square_center_n"        value="0.0" />
+    <param name="square_center_e"        value="0.0" />
+    <param name="square_size"            value="15.0" />
+    <param name="square_altitude"        value="-5.0" />
+    <!-- 0 → hanya 4 titik sudut; lintasan tetap dibentuk oleh interpolasi -->
+    <param name="square_points_per_side" value="0" />
+    <param name="square_constant_yaw"    value="true" />
+
+    <!-- Mode waypoint-follow: A → B → C → D -->
+    <param name="waypoint_follow_mode"   value="true" />
+    <param name="acceptance_radius_xy"   value="0.8" />
+    <param name="acceptance_alt_tol"     value="0.5" />
+    <param name="advance_on_reach"       value="true" />
+  </node>
+</launch>
