@@ -132,7 +132,7 @@ class Px4TrajectoryPublisherDirect(object):
         # ===================== PUB / SUB =====================
         # PUBLISH LANGSUNG KE PX4 POSITION CONTROLLER
         self.setpoint_pub = rospy.Publisher(
-            "/mavros/setpoint_position/local", PoseStamped, queue_size=10
+            "/mavros/setpoint_position/local", PoseStamped, queue_size=20
         )
         
         # Publish juga ke topic monitoring (opsional)
@@ -541,7 +541,7 @@ class Px4TrajectoryPublisherDirect(object):
             if self.pose_received:
                 # Hover di current position
                 pose_msg = PoseStamped()
-                pose_msg.header.stamp = rospy.Time.(0)
+                pose_msg.header.stamp = rospy.Time.now()
                 pose_msg.header.frame_id = "map"
                 pose_msg.pose.position.x = float(self.current_pos_enu[0])
                 pose_msg.pose.position.y = float(self.current_pos_enu[1])
@@ -714,7 +714,7 @@ class Px4TrajectoryPublisherDirect(object):
 
         # ===================== PUBLISH KE PX4 POSITION CONTROLLER =====================
         pose_msg = PoseStamped()
-        pose_msg.header.stamp = rospy.Time(0)
+        pose_msg.header.stamp = rospy.Time.now()
         pose_msg.header.frame_id = "map"
         pose_msg.pose.position.x = float(enu_pos[0])
         pose_msg.pose.position.y = float(enu_pos[1])
