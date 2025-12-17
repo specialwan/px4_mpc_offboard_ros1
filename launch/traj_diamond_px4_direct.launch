@@ -30,9 +30,23 @@
     <param name="acceptance_radius_xy"   value="0.8" />
     <param name="acceptance_alt_tol"     value="0.5" />
     <param name="advance_on_reach"       value="true" />
+
+    <param name="auto_arm"               value="false"/>
+    <param name="auto_offboard"          value="false"/>
     
     <!-- Waypoint follow mode -->
     <param name="waypoint_follow_mode"   value="true" />  <!-- false = trajectory tracking kontinyu -->
 
   </node>
+
+    <!-- ==== NODE 2: DATA LOGGER MAVROS TRAJ ==== -->
+  <node name="data_logger_mavros_traj"
+        pkg="mpc_offboard"
+        type="data_logger_mavros_traj.py"
+        output="screen">
+    <!-- Auto stop saat trajectory selesai -->
+    <param name="auto_stop_on_finish" value="true"/>
+    <param name="waypoint_fresh_duration" value="2.0"/>
+  </node>
+
 </launch>

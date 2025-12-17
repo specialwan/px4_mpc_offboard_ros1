@@ -758,9 +758,9 @@ class Px4TrajectoryPublisherGated(object):
         # Diamond TIDAK dirotasi - selalu fixed di N/E/S/W
         # Urutan: N → W → S → E (counter-clockwise)
         corners_world = [
-            [size, 0.0],      # WP1: North (depan)
+            [-size, 0.0],      # WP1: North (depan)
             [0.0, size],     # WP2: West (kiri)
-            [-size, 0.0],     # WP3: South (belakang)
+            [size, 0.0],     # WP3: South (belakang)
             [0.0, -size],      # WP4: East (kanan)
         ]
         

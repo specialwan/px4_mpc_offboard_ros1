@@ -55,8 +55,8 @@ class Px4TrajectoryPublisherDirect(object):
         self.current_wp_idx = 1
 
         # Auto ARM / OFFBOARD
-        self.auto_arm = rospy.get_param("~auto_arm", True)
-        self.auto_offboard = rospy.get_param("~auto_offboard", True)
+        self.auto_arm = rospy.get_param("~auto_arm", False)
+        self.auto_offboard = rospy.get_param("~auto_offboard", False)
 
         # Circle params
         self.circle_center_n = rospy.get_param("~circle_center_n", 0.0)
@@ -273,7 +273,7 @@ class Px4TrajectoryPublisherDirect(object):
                     altitude=0.0,
                     points_per_side=self.square_points_per_side,
                     constant_yaw=self.square_constant_yaw,
-                    initial_yaw=self.current_yaw
+                    # initial_yaw=self.current_yaw
                 )
             elif self.waypoint_mode == "helix":
                 path = self.generate_helix_waypoints(
@@ -337,8 +337,14 @@ class Px4TrajectoryPublisherDirect(object):
                 wp[1] += de  # Offset East
                 wp[2] += dd  # Offset altitude (preserving relative variation)
 
-            # Note: Tidak menghapus duplicate waypoint untuk diamond trajectory
-            # karena wp5 berbeda dari wp0 (posisi berbeda meski altitude sama)
+            # Jika titik terakhir sama dengan titik pertama (penutupan loop), hapus duplikat terakhir
+            if len(path) > 1:
+                first = path[0]
+                last = path[-1]
+                # Bandingkan N, E, dan altitude (toleransi kecil)
+                if (abs(first[0] - last[0]) < 1e-3) and (abs(first[1] - last[1]) < 1e-3) and (abs(first[2] - last[2]) < 1e-3):
+                    path.pop(-1)
+                    rospy.loginfo("🔄 Removed duplicate closing waypoint")
 
             rospy.loginfo(
                 "🚀 Trajectory anchored ke UAV: start NED ≈ (%.2f, %.2f, %.2f)",
@@ -706,67 +712,58 @@ class Px4TrajectoryPublisherDirect(object):
                      center_n, center_e, radius, -altitude, num_points)
         return waypoints
 
-    def generate_square_waypoints(self, center_n=0.0, center_e=0.0, size=20.0,
-                                  altitude=-5.0, points_per_side=0, constant_yaw=False,
-                                  initial_yaw=0.0):
+    def generate_square_waypoints(self, center_n=0.0, center_e=0.0, size=40.0,
+                                  altitude=-5.0, points_per_side=3, constant_yaw=True):
+        waypoints = []
         half = size / 2.0
-        
-        # Generate 4 corners di NED frame (relative to center)
-        # Urutan awal: Northeast, Southeast, Southwest, Northwest
-        corners_base = [
+
+        corners = [
             [center_n - half, center_e - half],
             [center_n + half, center_e - half],
             [center_n + half, center_e + half],
             [center_n - half, center_e + half],
         ]
-        
-        # Rotasi corners berdasarkan initial_yaw agar corner pertama searah dengan heading
-        # initial_yaw dalam ENU frame, konversi ke NED: yaw_ned = -yaw_enu
-        # Rotation matrix untuk NED: [N', E'] = [cos(θ) -sin(θ); sin(θ) cos(θ)] * [N, E]
-        cos_yaw = np.cos(initial_yaw)
-        sin_yaw = np.sin(initial_yaw)
-        
-        corners = []
-        for corner in corners_base:
-            n_rel = corner[0]
-            e_rel = corner[1]
-            # Rotate in NED frame
-            n_rot = cos_yaw * n_rel - sin_yaw * e_rel
-            e_rot = sin_yaw * n_rel + cos_yaw * e_rel
-            corners.append([center_n + n_rot, center_e + e_rot, altitude])
 
-        # Hitung yaw dari corner ke corner berikutnya
-        for i in range(len(corners)):
-            next_i = (i + 1) % len(corners)
-            dn = corners[next_i][0] - corners[i][0]
-            de = corners[next_i][1] - corners[i][1]
-            yaw = float(np.arctan2(de, dn))
-            corners[i].append(yaw)
+        for i in range(4):
+            start_corner = corners[i]
+            end_corner = corners[(i + 1) % 4]
 
-        if constant_yaw:
-            for c in corners:
-                c[3] = 0.0
-            rospy.loginfo("Square: constant_yaw=True, all yaws set to 0.0")
+            dn = end_corner[0] - start_corner[0]
+            de = end_corner[1] - start_corner[1]
+            yaw_current = np.arctan2(de, dn)
 
-        waypoints = []
-        if points_per_side > 0:
-            for i in range(4):
-                c0 = corners[i]
-                c1 = corners[(i+1) % 4]
-                for j in range(points_per_side):
-                    t = float(j) / float(points_per_side)
-                    n = (1-t)*c0[0] + t*c1[0]
-                    e = (1-t)*c0[1] + t*c1[1]
-                    d = (1-t)*c0[2] + t*c1[2]
-                    y = c0[3] if constant_yaw else ((1-t)*c0[3] + t*c1[3])
-                    waypoints.append([n, e, d, y])
-        else:
-            waypoints = corners
+            next_corner = corners[(i + 2) % 4]
+            dn_next = next_corner[0] - end_corner[0]
+            de_next = next_corner[1] - end_corner[1]
+            yaw_next = np.arctan2(de_next, dn_next)
 
-        rospy.loginfo("Square: center=(%.1f,%.1f), size=%.1f, pts=%d, constant_yaw=%s, rotated=%.1f°",
-                     center_n, center_e, size, len(waypoints), constant_yaw, np.degrees(initial_yaw))
-        rospy.loginfo("  First waypoint (relative): N=%.1f, E=%.1f (should be ahead of drone)",
-                     waypoints[0][0] - center_n, waypoints[0][1] - center_e)
+            num_points = points_per_side + 1
+            for j in range(num_points):
+                t = float(j) / float(points_per_side + 1)
+                n = start_corner[0] + t * dn
+                e = start_corner[1] + t * de
+
+                if constant_yaw:
+                    yaw = 0.0
+                elif t < 0.8:
+                    yaw = yaw_current
+                else:
+                    blend = (t - 0.8) / 0.2
+                    yaw_diff = yaw_next - yaw_current
+                    yaw_diff = np.arctan2(np.sin(yaw_diff), np.cos(yaw_diff))
+                    yaw = yaw_current + blend * yaw_diff
+
+                waypoints.append([float(n), float(e), float(altitude), float(yaw)])
+
+        if len(waypoints) > 0:
+            first = waypoints[0]
+            waypoints.append([first[0], first[1], first[2], first[3]])
+
+        yaw_mode = "constant (0°)" if constant_yaw else "following path direction"
+        rospy.loginfo(
+            "Square trajectory: center=(%.1f,%.1f), size=%.1f m, alt=%.1f m, points=%d, yaw=%s",
+            center_n, center_e, size, -altitude, len(waypoints), yaw_mode
+        )
         return waypoints
 
     def generate_helix_waypoints(self, center_n=0.0, center_e=0.0, radius=1.0,
@@ -839,9 +836,9 @@ class Px4TrajectoryPublisherDirect(object):
         # Diamond TIDAK dirotasi - selalu fixed di N/E/S/W
         # Urutan: N → E → S → W (clockwise)
         corners_world = [
-            [size, 0.0],      # WP1: North (depan)
+            [-size, 0.0],      # WP1: North (depan)
             [0.0, size],      # WP2: East (kanan)
-            [-size, 0.0],     # WP3: South (belakang)
+            [size, 0.0],     # WP3: South (belakang)
             [0.0, -size],     # WP4: West (kiri)
         ]
         
