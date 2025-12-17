@@ -169,13 +169,27 @@ class Px4TrajectoryPublisherDirect(object):
         # Timer publish 20 Hz
         self.timer = rospy.Timer(rospy.Duration(0.05), self.timer_cb)
         
+        rospy.loginfo("="*60)
         rospy.loginfo("✓ Trajectory Publisher (PX4 Direct) initialized")
+        rospy.loginfo("  Publishing to: /mavros/setpoint_position/local at 20Hz")
+        rospy.loginfo("  Auto ARM: %s", self.auto_arm)
+        rospy.loginfo("  Auto OFFBOARD: %s", self.auto_offboard)
+        if not (self.auto_arm or self.auto_offboard):
+            rospy.loginfo("  Manual mode: You need to ARM and switch to OFFBOARD manually")
+        rospy.loginfo("="*60)
 
     # ======================================================================
     # MAVROS callbacks
     # ======================================================================
     def state_callback(self, msg: State):
+        was_connected = self.current_state.connected if hasattr(self.current_state, 'connected') else False
         self.current_state = msg
+        
+        # Log connection state changes
+        if msg.connected and not was_connected:
+            rospy.loginfo("🔗 MAVROS connected to PX4!")
+        elif not msg.connected and was_connected:
+            rospy.logwarn("⚠️  MAVROS disconnected from PX4!")
 
     def position_callback(self, msg: PoseStamped):
         self.current_pos_enu[:] = [
@@ -462,11 +476,9 @@ class Px4TrajectoryPublisherDirect(object):
     # TIMER CALLBACK - PUBLISH KE PX4
     # ======================================================================
     def timer_cb(self, event):
-        if not self.traj_initialized:
-            return
-
         # ======== SETPOINT STREAM COUNTER (ALWAYS COUNT) ========
         # PX4 memerlukan continuous setpoint stream sebelum OFFBOARD mode
+        # HARUS publish setpoint bahkan sebelum trajectory initialized!
         if not self.setpoint_stream_started:
             self.setpoint_stream_started = True
             rospy.loginfo("📡 Starting setpoint stream (need %d points before OFFBOARD)", 
@@ -523,6 +535,35 @@ class Px4TrajectoryPublisherDirect(object):
                     rospy.loginfo("Already ARMED")
                     self.arm_requested = True
 
+        # ======== PUBLISH SETPOINT (ALWAYS, EVEN BEFORE TRAJECTORY READY) ========
+        # Jika trajectory belum initialized, publish current position sebagai setpoint
+        if not self.traj_initialized:
+            if self.pose_received:
+                # Hover di current position
+                pose_msg = PoseStamped()
+                pose_msg.header.stamp = rospy.Time.now()
+                pose_msg.header.frame_id = "map"
+                pose_msg.pose.position.x = float(self.current_pos_enu[0])
+                pose_msg.pose.position.y = float(self.current_pos_enu[1])
+                pose_msg.pose.position.z = float(self.current_pos_enu[2])
+                
+                # Keep current yaw
+                yaw_enu = self.current_yaw
+                qz = np.sin(yaw_enu / 2.0)
+                qw = np.cos(yaw_enu / 2.0)
+                pose_msg.pose.orientation.x = 0.0
+                pose_msg.pose.orientation.y = 0.0
+                pose_msg.pose.orientation.z = float(qz)
+                pose_msg.pose.orientation.w = float(qw)
+                
+                # PUBLISH!
+                self.setpoint_pub.publish(pose_msg)
+                rospy.loginfo_throttle(2.0, "📡 Publishing setpoint (hover at current pos) - waiting for trajectory init...")
+            else:
+                rospy.loginfo_throttle(2.0, "⏳ Waiting for first pose from MAVROS...")
+            return
+
+        # Trajectory sudah ready, lanjutkan dengan logika normal
         now = rospy.Time.now().to_sec()
         yaw0 = self.yaws[0]
 
@@ -694,12 +735,16 @@ class Px4TrajectoryPublisherDirect(object):
         pose_msg.pose.orientation.w = float(qw)
         
         # DEBUG: Log published yaw
-        if not self.setpoint_stream_started or self.mode == "WAIT_ALT":
-            rospy.loginfo_throttle(1.0, f"[PUBLISH] yaw_ned={np.degrees(yaw_ref):.1f}° → yaw_enu={np.degrees(yaw_enu):.1f}° → quat(qw={qw:.3f}, qz={qz:.3f})")
+        if self.mode == "WAIT_ALT":
+            rospy.loginfo_throttle(1.0, f"[PUBLISH] pos=({enu_pos[0]:.2f}, {enu_pos[1]:.2f}, {enu_pos[2]:.2f}) yaw={np.degrees(yaw_enu):.1f}°")
 
         # PUBLISH LANGSUNG KE PX4!
         self.setpoint_pub.publish(pose_msg)
         self.waypoint_pub.publish(pose_msg)  # For monitoring
+        
+        # Log publish rate untuk debugging
+        if self.setpoint_count <= self.required_setpoints + 10:
+            rospy.loginfo_throttle(1.0, f"✅ Publishing setpoint to /mavros/setpoint_position/local (count: {self.setpoint_count})")
 
     # ======================================================================
     # TRAJECTORY GENERATORS (SAMA dengan trajectory_publisher_mavros_gated.py)
