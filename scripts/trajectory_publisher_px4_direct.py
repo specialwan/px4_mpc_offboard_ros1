@@ -465,20 +465,27 @@ class Px4TrajectoryPublisherDirect(object):
         if not self.traj_initialized:
             return
 
-        # ======== AUTO ARM / OFFBOARD SEQUENCE ========
+        # ======== SETPOINT STREAM COUNTER (ALWAYS COUNT) ========
+        # PX4 memerlukan continuous setpoint stream sebelum OFFBOARD mode
+        if not self.setpoint_stream_started:
+            self.setpoint_stream_started = True
+            rospy.loginfo("📡 Starting setpoint stream (need %d points before OFFBOARD)", 
+                         self.required_setpoints)
+
+        if self.setpoint_count < self.required_setpoints:
+            self.setpoint_count += 1
+            if self.setpoint_count % 20 == 0:
+                rospy.loginfo("📡 Setpoint stream: %d/%d", 
+                             self.setpoint_count, self.required_setpoints)
+        elif self.setpoint_count == self.required_setpoints:
+            # Hanya log sekali saat mencapai required setpoints
+            self.setpoint_count += 1  # Increment agar tidak log terus
+            if not (self.auto_arm or self.auto_offboard):
+                rospy.loginfo("✅ Setpoint stream ready! You can now switch to OFFBOARD mode manually.")
+                rospy.loginfo("   Use QGroundControl or: rosservice call /mavros/set_mode \"custom_mode: 'OFFBOARD'\"")
+
+        # ======== AUTO ARM / OFFBOARD SEQUENCE (OPTIONAL) ========
         if self.auto_arm or self.auto_offboard:
-            # Step 1: Stream setpoints sebelum OFFBOARD
-            if not self.setpoint_stream_started:
-                self.setpoint_stream_started = True
-                rospy.loginfo("📡 Starting setpoint stream (need %d points before OFFBOARD)", 
-                             self.required_setpoints)
-
-            if self.setpoint_count < self.required_setpoints:
-                self.setpoint_count += 1
-                if self.setpoint_count % 20 == 0:
-                    rospy.loginfo("📡 Setpoint stream: %d/%d", 
-                                 self.setpoint_count, self.required_setpoints)
-
             # Step 2: Set OFFBOARD mode
             if self.auto_offboard and \
                self.setpoint_count >= self.required_setpoints and \
