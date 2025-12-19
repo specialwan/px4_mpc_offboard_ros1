@@ -14,6 +14,7 @@ Fitur:
   - /trajectory/ref_vel           (🔁 trajectory reference velocity)
   - /control/trajectory_setpoint  (output posisi dari MPC)
   - /control/velocity_setpoint    (output kecepatan dari MPC)
+  - /control/mpc_acceleration     (🆕 output acceleration dari MPC sebelum konversi ke attitude)
   - /mavros/setpoint_raw/target_attitude  (attitude target yang dikirim ke PX4)
 """
 
@@ -29,7 +30,7 @@ import numpy as np
 import pandas as pd
 
 import rospy
-from geometry_msgs.msg import PoseStamped, TwistStamped
+from geometry_msgs.msg import PoseStamped, TwistStamped, Vector3Stamped
 from mavros_msgs.msg import AttitudeTarget
 from std_msgs.msg import String
 
@@ -79,6 +80,7 @@ class DataLoggerMavrosTraj(object):
             'control_pos_x', 'control_pos_y', 'control_pos_z',
             'control_vel_x', 'control_vel_y', 'control_vel_z', 'control_vel_mag',
             'control_yaw_deg',
+            'mpc_accel_x', 'mpc_accel_y', 'mpc_accel_z', 'mpc_accel_mag',  # MPC acceleration output (NED)
             'attitude_target_roll_deg', 'attitude_target_pitch_deg', 'attitude_target_yaw_deg',
             'attitude_target_thrust',
             'error_x', 'error_y', 'error_z', 'error_mag',
@@ -102,6 +104,9 @@ class DataLoggerMavrosTraj(object):
         self.control_pos = np.zeros(3)
         self.control_vel = np.zeros(3)
         self.control_yaw = 0.0
+
+        # MPC acceleration output (NED frame)
+        self.mpc_acceleration = np.zeros(3)
 
         # attitude target (dari controller via MAVROS)
         self.attitude_target_euler = np.zeros(3)
@@ -167,6 +172,14 @@ class DataLoggerMavrosTraj(object):
             '/control/velocity_setpoint',
             TwistStamped,
             self.control_velocity_callback,
+            queue_size=queue_size
+        )
+
+        # MPC acceleration output (NED frame, sebelum dikonversi ke attitude)
+        self.mpc_accel_sub = rospy.Subscriber(
+            '/control/mpc_acceleration',
+            Vector3Stamped,
+            self.mpc_acceleration_callback,
             queue_size=queue_size
         )
 
@@ -328,6 +341,17 @@ class DataLoggerMavrosTraj(object):
         self.attitude_target_euler = self.quaternion_to_euler(q.w, q.x, q.y, q.z)
         self.attitude_target_thrust = msg.thrust
 
+    def mpc_acceleration_callback(self, msg: Vector3Stamped):
+        """MPC acceleration output (NED frame) sebelum dikonversi ke attitude."""
+        if self._shutting_down:
+            return
+        
+        self.mpc_acceleration = np.array([
+            msg.vector.x,  # ax (North)
+            msg.vector.y,  # ay (East)
+            msg.vector.z   # az (Down)
+        ])
+
     def trajectory_status_callback(self, msg: String):
         """Callback untuk status trajectory - auto stop saat selesai"""
         if msg.data == "FINISHED" and not self.trajectory_finished:
@@ -438,6 +462,12 @@ class DataLoggerMavrosTraj(object):
             'control_vel_mag': float(np.linalg.norm(self.control_vel)),
 
             'control_yaw_deg': float(np.degrees(self.control_yaw)),
+
+            # MPC acceleration output (NED frame)
+            'mpc_accel_x': self.mpc_acceleration[0],
+            'mpc_accel_y': self.mpc_acceleration[1],
+            'mpc_accel_z': self.mpc_acceleration[2],
+            'mpc_accel_mag': float(np.linalg.norm(self.mpc_acceleration)),
 
             'attitude_target_roll_deg': float(np.degrees(self.attitude_target_euler[0])),
             'attitude_target_pitch_deg': float(np.degrees(self.attitude_target_euler[1])),

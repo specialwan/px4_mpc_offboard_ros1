@@ -23,7 +23,7 @@ import rospy
 import numpy as np
 import quadprog  # pastikan sudah: pip3 install quadprog
 
-from geometry_msgs.msg import PoseStamped, TwistStamped
+from geometry_msgs.msg import PoseStamped, TwistStamped, Vector3Stamped
 from mavros_msgs.msg import State, AttitudeTarget
 
 
@@ -136,6 +136,7 @@ class MPCPositionController:
             u_opt = quadprog.solve_qp(self.H, -f, C.T, b, meq=0)[0]
             u = u_opt[:self.nu]
 
+            # COMMENT untuk test constraint MPC murni
             # pengaman lateral saat error z besar
             z_err = abs(x[2] - x_ref[2])
             if z_err > 0.3:
@@ -155,6 +156,7 @@ class MPCPositionController:
 def acceleration_to_attitude_thrust_px4(accel_ned, yaw_desired, hover_thrust=0.35, gravity=9.81):
     ax, ay, az = accel_ned
 
+    # COMMENT untuk test constraint MPC murni
     ax = np.clip(ax, -3.0, 3.0)
     ay = np.clip(ay, -3.0, 3.0)
     az = np.clip(az, -5.0, 5.0)
@@ -294,6 +296,11 @@ class MPCTrajectoryFollowerManualROS1:
         self.attitude_pub = rospy.Publisher(
             "/mavros/setpoint_raw/attitude", AttitudeTarget, queue_size=20
         )
+        
+        # Publisher untuk MPC acceleration output (NED frame)
+        self.accel_pub = rospy.Publisher(
+            "/control/mpc_acceleration", Vector3Stamped, queue_size=20
+        )
 
         # ===================== TIMERS =====================
         self.mpc_timer = rospy.Timer(rospy.Duration(0.1), self.mpc_callback)    # 10 Hz
@@ -402,6 +409,15 @@ class MPCTrajectoryFollowerManualROS1:
 
         acc = self.mpc.compute_control(x, x_ref)
         self.mpc_acceleration = acc
+        
+        # Publish acceleration output (NED frame)
+        accel_msg = Vector3Stamped()
+        accel_msg.header.stamp = rospy.Time.now()
+        accel_msg.header.frame_id = "base_link_ned"
+        accel_msg.vector.x = float(acc[0])  # ax (North)
+        accel_msg.vector.y = float(acc[1])  # ay (East)
+        accel_msg.vector.z = float(acc[2])  # az (Down)
+        self.accel_pub.publish(accel_msg)
 
         roll, pitch, yaw, thrust, R = acceleration_to_attitude_thrust_px4(
             acc, self.ref_yaw, hover_thrust=0.35, gravity=9.81
