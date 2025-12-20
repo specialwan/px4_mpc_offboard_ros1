@@ -778,12 +778,20 @@ class Px4TrajectoryPublisherGated(object):
                 e = center_e + corner[1]
                 d = start_altitude + i * altitude_step
                 
-                # Yaw menghadap ke arah KEBERANGKATAN ke corner berikutnya
-                next_corner_idx = (corner_idx - 1) % 4
-                next_corner = corners_world[next_corner_idx]
-                
-                dn = corner[0] - next_corner[0]
-                de = corner[1] - next_corner[1]
+                # Yaw menghadap ke arah KEDATANGAN dari waypoint sebelumnya
+                # Untuk WP0: menghadap ke WP1 (karena belum ada waypoint sebelumnya)
+                # Untuk WP1-4: menghadap ke arah dari WP sebelumnya ke WP ini
+                if i == 0:
+                    # WP0: menghadap ke WP1
+                    next_corner = corners_world[1]
+                    dn = next_corner[0] - corner[0]
+                    de = next_corner[1] - corner[1]
+                else:
+                    # WP1-4: menghadap ke arah dari WP sebelumnya (arah kedatangan)
+                    prev_corner_idx = (corner_idx - 1 + 4) % 4
+                    prev_corner = corners_world[prev_corner_idx]
+                    dn = corner[0] - prev_corner[0]
+                    de = corner[1] - prev_corner[1]
                 
                 yaw = float(np.arctan2(de, dn))
                 

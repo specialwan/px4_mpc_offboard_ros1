@@ -918,7 +918,7 @@ class Px4TrajectoryPublisherDirect(object):
                 to_corner = corners_world[(swapped_idx - 1) % 4]
                 
                 dn = to_corner[0] - from_corner[0]
-                de = to_corner[1] - from_corner[1]
+                de = to_corner[1] - from_corner[1] 
                 
                 yaw = float(np.arctan2(de, dn))
                 
