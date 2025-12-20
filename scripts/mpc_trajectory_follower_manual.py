@@ -72,7 +72,7 @@ class MPCPositionController:
         self.R_delta = np.diag([0.45, 0.45, 0.15])  # penalti perubahan u
 
         self.u_prev = np.zeros(self.nu)
-        self.a_max = 3.5  # m/s^2
+        self.a_max = 4.5  # m/s^2
 
         self._build_prediction_matrices()
 
