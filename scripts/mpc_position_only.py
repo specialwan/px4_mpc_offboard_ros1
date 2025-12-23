@@ -1,37 +1,40 @@
 #!/usr/bin/env python3
 ############################################################################
 #
-#   MPC Trajectory Tracking Controller (MAVROS Version, ROS1)
-#   VARIAN MANUAL-OFFBOARD:
+#   MPC Position-Only Controller (MAVROS Version, ROS1)
+#   VARIAN TANPA REFERENSI KECEPATAN:
 #
 #   - ROS1 + mavros
 #   - MPC 6-state: [x, y, z, vx, vy, vz]
 #   - Input referensi dari trajectory publisher:
-#       /trajectory/ref_pose (PoseStamped, ENU)
-#       /trajectory/ref_vel  (TwistStamped, ENU)
+#       /trajectory/ref_pose_only (PoseStamped, ENU) - HANYA POSISI
 #   - Output: acceleration [ax, ay, az] (NED)
 #   - Dikonversi ke Attitude + Thrust → /mavros/setpoint_raw/attitude
 #
-#   PERBEDAAN UTAMA:
-#   - TIDAK ada pemanggilan service ARM / OFFBOARD dari kode ini.
-#   - Pilot harus set mode OFFBOARD + ARM manual (QGC / RC).
-#   - Node hanya mengontrol bila mode=OFFBOARD dan armed=True.
+#   PERBEDAAN DENGAN mpc_trajectory_follower_manual.py:
+#   - Cost function HANYA meminimalkan error posisi (Q_vel = 0)
+#   - TIDAK ada input referensi kecepatan
+#   - Lebih simpel, cocok untuk waypoint following tanpa trajectory planning
 #
 ############################################################################
 
 import rospy
 import numpy as np
-import quadprog  # pastikan sudah: pip3 install quadprog
+import quadprog  # pip3 install quadprog
 
 from geometry_msgs.msg import PoseStamped, TwistStamped, Vector3Stamped
 from mavros_msgs.msg import State, AttitudeTarget
 
 
-class MPCPositionController:
+class MPCPositionOnlyController:
     """
-    MPC Controller untuk posisi
+    MPC Controller untuk posisi SAJA (tanpa referensi kecepatan)
     6-state model: [x, y, z, vx, vy, vz]
     3 control inputs: [ax, ay, az] (perintah akselerasi)
+    
+    Cost function: J = sum(Q_pos * ||pos - pos_ref||^2) + R * ||u||^2 + R_delta * ||Δu||^2
+    
+    Kecepatan TIDAK ada di cost function, hanya digunakan untuk prediksi state.
     """
 
     def __init__(self, dt=0.1, Np=10, Nc=3):
@@ -40,6 +43,9 @@ class MPCPositionController:
         self.Nc = Nc
         self.nx = 6  # [x, y, z, vx, vy, vz]
         self.nu = 3  # [ax, ay, az]
+        
+        # Jumlah output yang di-cost (hanya posisi)
+        self.ny = 3  # [x, y, z]
 
         # System matrices (integrator model)
         self.A = np.array([
@@ -60,12 +66,17 @@ class MPCPositionController:
             [0,         0,         dt       ],  # vz
         ])
 
-        self.C = np.eye(self.nx)
+        # Output matrix: HANYA posisi (3x6)
+        self.C = np.array([
+            [1, 0, 0, 0, 0, 0],  # x
+            [0, 1, 0, 0, 0, 0],  # y
+            [0, 0, 1, 0, 0, 0],  # z
+        ])
 
-        # Cost matrices - SAFE MODE REAL FLIGHT
+        # Cost matrices - HANYA POSISI
+        # Q untuk output (posisi saja, 3x3)
         self.Q = np.diag([
-            50.0, 50.0, 120.0,   # posisi
-            5.0, 5.0, 15.0     # kecepatan
+            50.0, 50.0, 120.0   # posisi x, y, z
         ])
 
         self.R = np.diag([0.30, 0.30, 0.10])     # penalti besarnya u
@@ -77,28 +88,36 @@ class MPCPositionController:
         self._build_prediction_matrices()
 
     def _build_prediction_matrices(self):
-        # Phi
-        self.Phi = np.zeros((self.Np*self.nx, self.nx))
+        """
+        Build prediction matrices untuk output (posisi saja)
+        Y = Phi_y * x0 + Gamma_y * U
+        """
+        # Phi untuk output: (Np*ny, nx)
+        self.Phi_y = np.zeros((self.Np*self.ny, self.nx))
         A_power = np.eye(self.nx)
         for i in range(self.Np):
             A_power = A_power @ self.A
-            self.Phi[i*self.nx:(i+1)*self.nx, :] = A_power
+            self.Phi_y[i*self.ny:(i+1)*self.ny, :] = self.C @ A_power
 
-        # Gamma
-        self.Gamma = np.zeros((self.Np*self.nx, self.Nc*self.nu))
+        # Gamma untuk output: (Np*ny, Nc*nu)
+        self.Gamma_y = np.zeros((self.Np*self.ny, self.Nc*self.nu))
         for i in range(self.Np):
             for j in range(min(i+1, self.Nc)):
                 A_power = np.eye(self.nx)
                 for _ in range(i - j):
                     A_power = A_power @ self.A
-                self.Gamma[i*self.nx:(i+1)*self.nx, j*self.nu:(j+1)*self.nu] = A_power @ self.B
+                self.Gamma_y[i*self.ny:(i+1)*self.ny, j*self.nu:(j+1)*self.nu] = self.C @ A_power @ self.B
 
         self._build_qp_matrices()
 
     def _build_qp_matrices(self):
-        Q_bar = np.kron(np.eye(self.Np), self.Q)
-        R_bar = np.kron(np.eye(self.Nc), self.R)
+        """
+        Build QP matrices: H dan template untuk f
+        """
+        Q_bar = np.kron(np.eye(self.Np), self.Q)  # (Np*ny, Np*ny)
+        R_bar = np.kron(np.eye(self.Nc), self.R)  # (Nc*nu, Nc*nu)
 
+        # Rate penalty matrix
         R_delta_bar = np.zeros((self.Nc*self.nu, self.Nc*self.nu))
         for i in range(self.Nc):
             R_delta_bar[i*self.nu:(i+1)*self.nu, i*self.nu:(i+1)*self.nu] = self.R_delta
@@ -106,23 +125,39 @@ class MPCPositionController:
                 R_delta_bar[i*self.nu:(i+1)*self.nu, (i-1)*self.nu:i*self.nu] = -self.R_delta
                 R_delta_bar[(i-1)*self.nu:i*self.nu, i*self.nu:(i+1)*self.nu] = -self.R_delta
 
-        H = self.Gamma.T @ Q_bar @ self.Gamma + R_bar + R_delta_bar
+        # Hessian: H = Gamma_y' * Q_bar * Gamma_y + R_bar + R_delta_bar
+        H = self.Gamma_y.T @ Q_bar @ self.Gamma_y + R_bar + R_delta_bar
         self.H = (H + H.T) / 2.0  # symmetrize
 
         self.Q_bar = Q_bar
         self.R_delta_bar = R_delta_bar
 
-    def compute_control(self, x, x_ref):
-        # x, x_ref: shape (6,)
-        r = np.tile(x_ref, self.Np)
-        err_pred = self.Phi @ x - r
+    def compute_control(self, x, pos_ref):
+        """
+        Compute MPC control dengan HANYA referensi posisi.
+        
+        Args:
+            x: Current state [x, y, z, vx, vy, vz] (6,)
+            pos_ref: Reference position [x, y, z] (3,) - HANYA POSISI
+        
+        Returns:
+            u: Control input [ax, ay, az] (3,)
+        """
+        # Reference untuk semua horizon (hanya posisi, 3 elemen per step)
+        r = np.tile(pos_ref, self.Np)  # (Np*3,)
+        
+        # Predicted output error
+        err_pred = self.Phi_y @ x - r  # (Np*3,)
 
+        # Previous control extended
         u_prev_ext = np.tile(self.u_prev, self.Nc)
 
-        f_tracking = self.Gamma.T @ self.Q_bar @ err_pred
+        # Gradient
+        f_tracking = self.Gamma_y.T @ self.Q_bar @ err_pred
         f_rate = -self.R_delta_bar @ u_prev_ext
         f = f_tracking + f_rate
 
+        # Constraints: -a_max <= u <= a_max
         C = np.vstack([
             np.eye(self.Nc*self.nu),
             -np.eye(self.Nc*self.nu)
@@ -136,11 +171,10 @@ class MPCPositionController:
             u_opt = quadprog.solve_qp(self.H, -f, C.T, b, meq=0)[0]
             u = u_opt[:self.nu]
 
-            # COMMENT untuk test constraint MPC murni
-            # pengaman lateral saat error z besar
-            z_err = abs(x[2] - x_ref[2])
-            if z_err > 0.3:
-                lateral_reduction = np.clip(1.0 - (z_err - 0.3)*2.0, 0.3, 1.0)
+            # Pengaman lateral saat error z besar (opsional, bisa di-comment)
+            z_err = abs(x[2] - pos_ref[2])
+            if z_err > 0.5:
+                lateral_reduction = np.clip(1.0 - (z_err - 0.5)*1.5, 0.3, 1.0)
                 u[0] *= lateral_reduction
                 u[1] *= lateral_reduction
 
@@ -154,12 +188,14 @@ class MPCPositionController:
 
 
 def acceleration_to_attitude_thrust_px4(accel_ned, yaw_desired, hover_thrust=0.35, gravity=9.81):
+    """
+    Convert acceleration command (NED) to attitude + thrust for PX4.
+    """
     ax, ay, az = accel_ned
 
-    # COMMENT untuk test constraint MPC murni
-    ax = np.clip(ax, -8.0, 8.0)
-    ay = np.clip(ay, -8.0, 8.0)
-    az = np.clip(az, -8.0, 8.0)
+    ax = np.clip(ax, -10.0, 10.0)
+    ay = np.clip(ay, -10.0, 10.0)
+    az = np.clip(az, -10.0, 10.0)
 
     specific_force = np.array([ax, ay, az - gravity])
 
@@ -194,7 +230,7 @@ def acceleration_to_attitude_thrust_px4(accel_ned, yaw_desired, hover_thrust=0.3
     pitch = np.arcsin(-np.clip(R[2, 0], -1.0, 1.0))
     yaw = np.arctan2(R[1, 0], R[0, 0])
 
-    max_tilt = np.radians(30.0)
+    max_tilt = np.radians(45.0)
     roll = np.clip(roll, -max_tilt, max_tilt)
     pitch = np.clip(pitch, -max_tilt, max_tilt)
 
@@ -202,6 +238,7 @@ def acceleration_to_attitude_thrust_px4(accel_ned, yaw_desired, hover_thrust=0.3
 
 
 def quaternion_to_euler(q):
+    """Convert quaternion [w,x,y,z] to euler angles [roll, pitch, yaw]."""
     w, x, y, z = q
 
     sinr_cosp = 2.0*(w*x + y*z)
@@ -221,29 +258,28 @@ def quaternion_to_euler(q):
     return roll, pitch, yaw
 
 
-class MPCTrajectoryFollowerManualROS1:
+class MPCPositionOnlyROS1:
     """
-    Versi TRAJECTORY TRACKING MANUAL-OFFBOARD:
-    - Referensi posisi + yaw dari /trajectory/ref_pose (ENU)
-    - Referensi kecepatan dari /trajectory/ref_vel (ENU)
-    - MPC tracking state x = [pos_ned, vel_ned] → x_ref dari traj
-    - Mode OFFBOARD + ARM diatur manual oleh pilot (QGC / RC).
-    - Node hanya mengontrol saat mode=OFFBOARD dan armed=True.
+    MPC Position-Only Tracker (ROS1 + MAVROS):
+    
+    - Referensi HANYA posisi + yaw dari /trajectory/ref_pose_only (ENU)
+    - TIDAK ada referensi kecepatan
+    - Cost function hanya meminimalkan error posisi
+    - Mode OFFBOARD + ARM diatur manual oleh pilot (QGC / RC)
     """
 
     def __init__(self):
-        self.node_name = "mpc_trajectory_follower_manual"
+        self.node_name = "mpc_position_only"
         rospy.loginfo("="*60)
-        rospy.loginfo("MPC Trajectory Tracking (ROS1 + MAVROS) - MANUAL OFFBOARD")
-        rospy.loginfo("Input ref: /trajectory/ref_pose & /trajectory/ref_vel")
+        rospy.loginfo("MPC Position-Only Controller (ROS1 + MAVROS)")
+        rospy.loginfo("Input ref: /trajectory/ref_pose (POSITION ONLY)")
         rospy.loginfo("Output   : /mavros/setpoint_raw/attitude")
-        rospy.loginfo("Mode & ARM dikendalikan manual dari QGC/RC")
-        rospy.loginfo("MPC Optimization: 10 Hz | Control Output: 50 Hz")
+        rospy.loginfo("Cost function: ONLY position error (no velocity ref)")
         rospy.loginfo("="*60)
 
-        # MPC core
-        self.mpc = MPCPositionController(dt=0.1, Np=10, Nc=3)
-        rospy.loginfo("MPC Controller initialized: dt=0.1s, Np=6, Nc=3")
+        # MPC core (position only)
+        self.mpc = MPCPositionOnlyController(dt=0.1, Np=10, Nc=3)
+        rospy.loginfo("MPC Position-Only Controller initialized: dt=0.1s, Np=10, Nc=3")
 
         # State MAVROS
         self.current_state = State()
@@ -255,15 +291,12 @@ class MPCTrajectoryFollowerManualROS1:
         self.current_velocity = np.zeros(3)      # [vN,vE,vD]
         self.current_orientation = np.array([1.0, 0.0, 0.0, 0.0])  # w,x,y,z
 
-        # Trajectory reference (NED)
+        # Trajectory reference (NED) - HANYA POSISI
         self.ref_position = np.array([0.0, 0.0, -2.5])
-        self.ref_velocity = np.zeros(3)
         self.ref_yaw = 0.0
-
         self.ref_pose_received = False
-        self.ref_vel_received = False
 
-        # Output MPC (aks NED) + attitude hasil konversi
+        # Output MPC
         self.mpc_acceleration = np.zeros(3)
         self.attitude_roll = 0.0
         self.attitude_pitch = 0.0
@@ -284,12 +317,9 @@ class MPCTrajectoryFollowerManualROS1:
             "/mavros/local_position/velocity_local", TwistStamped, self.local_vel_callback, queue_size=10
         )
 
-        # Trajectory references (ENU)
+        # Trajectory reference: HANYA POSISI (ENU)
         self.traj_pose_sub = rospy.Subscriber(
             "/trajectory/ref_pose", PoseStamped, self.traj_pose_callback, queue_size=10
-        )
-        self.traj_vel_sub = rospy.Subscriber(
-            "/trajectory/ref_vel", TwistStamped, self.traj_vel_callback, queue_size=10
         )
 
         # ===================== PUBLISHERS =====================
@@ -325,7 +355,7 @@ class MPCTrajectoryFollowerManualROS1:
 
         if prev_offboard != self.offboard_mode:
             if self.offboard_mode:
-                rospy.loginfo("✓ OFFBOARD MODE ACTIVE (set manual)")
+                rospy.loginfo("✓ OFFBOARD MODE ACTIVE")
             else:
                 rospy.logwarn("✗ OFFBOARD MODE INACTIVE")
 
@@ -343,7 +373,7 @@ class MPCTrajectoryFollowerManualROS1:
         ])
 
     def local_vel_callback(self, msg: TwistStamped):
-        # ENU → NED
+        # ENU → NED (masih perlu untuk state prediction)
         self.current_velocity[0] = msg.twist.linear.y
         self.current_velocity[1] = msg.twist.linear.x
         self.current_velocity[2] = -msg.twist.linear.z
@@ -351,6 +381,7 @@ class MPCTrajectoryFollowerManualROS1:
     def traj_pose_callback(self, msg: PoseStamped):
         """
         Pose referensi dari trajectory publisher (ENU) → simpan di NED
+        HANYA posisi, tanpa kecepatan.
         """
         # Posisi ENU → NED
         n = msg.pose.position.y
@@ -370,21 +401,7 @@ class MPCTrajectoryFollowerManualROS1:
 
         if not self.ref_pose_received:
             self.ref_pose_received = True
-            rospy.loginfo("✅ Trajectory pose reference received.")
-
-    def traj_vel_callback(self, msg: TwistStamped):
-        """
-        Velocity referensi dari trajectory publisher (ENU) → simpan di NED
-        """
-        # ENU vel: [vx, vy, vz] → NED: [vn, ve, vd]
-        vn = msg.twist.linear.y
-        ve = msg.twist.linear.x
-        vd = -msg.twist.linear.z
-        self.ref_velocity = np.array([vn, ve, vd])
-
-        if not self.ref_vel_received:
-            self.ref_vel_received = True
-            rospy.loginfo("✅ Trajectory velocity reference received.")
+            rospy.loginfo("✅ Trajectory pose reference received (POSITION ONLY mode).")
 
     # ===================== MPC timer =====================
 
@@ -393,21 +410,20 @@ class MPCTrajectoryFollowerManualROS1:
         if not (self.offboard_mode and self.armed):
             return
 
-        # Jika belum ada trajectory ref, tahan dekat posisi sekarang (hover pada z=-5m)
+        # Jika belum ada trajectory ref, hover di posisi sekarang
         if not self.ref_pose_received:
             self.ref_position[0] = self.current_position[0]
             self.ref_position[1] = self.current_position[1]
-            self.ref_position[2] = -2.5
-            self.ref_velocity[:] = 0.0
-        else:
-            if not self.ref_vel_received:
-                self.ref_velocity[:] = 0.0
+            self.ref_position[2] = -2.5  # Default hover altitude
 
-        # State & reference vector (NED)
+        # State vector (6D: pos + vel untuk prediksi)
         x = np.concatenate([self.current_position, self.current_velocity])
-        x_ref = np.concatenate([self.ref_position, self.ref_velocity])
+        
+        # Reference: HANYA POSISI (3D)
+        pos_ref = self.ref_position
 
-        acc = self.mpc.compute_control(x, x_ref)
+        # Compute MPC control
+        acc = self.mpc.compute_control(x, pos_ref)
         self.mpc_acceleration = acc
         
         # Publish acceleration output (NED frame)
@@ -419,6 +435,7 @@ class MPCTrajectoryFollowerManualROS1:
         accel_msg.vector.z = float(acc[2])  # az (Down)
         self.accel_pub.publish(accel_msg)
 
+        # Convert to attitude + thrust
         roll, pitch, yaw, thrust, R = acceleration_to_attitude_thrust_px4(
             acc, self.ref_yaw, hover_thrust=0.35, gravity=9.81
         )
@@ -429,16 +446,16 @@ class MPCTrajectoryFollowerManualROS1:
         self.attitude_thrust = thrust
         self.attitude_R_matrix = R
 
+        # Logging
         pos_err = np.linalg.norm(self.ref_position - self.current_position)
-        vel_err = np.linalg.norm(self.ref_velocity - self.current_velocity)
+        vel_norm = np.linalg.norm(self.current_velocity)
 
         rospy.loginfo_throttle(
             1.0,
-            f"🎯 MPC TRAJ STATE:\n"
+            f"🎯 MPC POS-ONLY STATE:\n"
             f"   Pos: [{self.current_position[0]:.1f}, {self.current_position[1]:.1f}, {self.current_position[2]:.1f}] → "
             f"[{self.ref_position[0]:.1f}, {self.ref_position[1]:.1f}, {self.ref_position[2]:.1f}] | Err: {pos_err:.2f}m\n"
-            f"   Vel: [{self.current_velocity[0]:.2f}, {self.current_velocity[1]:.2f}, {self.current_velocity[2]:.2f}] → "
-            f"[{self.ref_velocity[0]:.2f}, {self.ref_velocity[1]:.2f}, {self.ref_velocity[2]:.2f}] m/s | Err: {vel_err:.2f}\n"
+            f"   Vel: [{self.current_velocity[0]:.2f}, {self.current_velocity[1]:.2f}, {self.current_velocity[2]:.2f}] m/s (no ref)\n"
             f"   Acc: [{acc[0]:.2f}, {acc[1]:.2f}, {acc[2]:.2f}] m/s² | Thrust: {thrust:.3f}"
         )
 
@@ -459,8 +476,7 @@ class MPCTrajectoryFollowerManualROS1:
 
     def control_loop(self, event):
         """
-        Tetap publish attitude setpoint terus menerus (50 Hz).
-        PX4 akan memakai setpoint ini hanya ketika mode=OFFBOARD.
+        Publish attitude setpoint continuously (50 Hz).
         """
         att = AttitudeTarget()
         att.header.stamp = rospy.Time.now()
@@ -493,13 +509,9 @@ class MPCTrajectoryFollowerManualROS1:
                 f"{att.orientation.z:.3f},{att.orientation.w:.3f}]"
             )
 
-    # ===================== State monitor (tanpa command) =====================
+    # ===================== State monitor =====================
 
     def state_monitor_callback(self, event):
-        """
-        Hanya monitor status dan error, TANPA kirim perintah ARM / OFFBOARD.
-        Semua kontrol mode dilakukan manual oleh pilot.
-        """
         if self.offboard_mode and self.armed:
             err = np.linalg.norm(self.current_position - self.ref_position)
             vel_norm = np.linalg.norm(self.current_velocity)
@@ -507,20 +519,19 @@ class MPCTrajectoryFollowerManualROS1:
 
             if self.ref_pose_received:
                 rospy.loginfo(
-                    f"[MPC ACTIVE] Pos: [{self.current_position[0]:.1f}, {self.current_position[1]:.1f}, {self.current_position[2]:.1f}] | "
+                    f"[MPC POS-ONLY ACTIVE] Pos: [{self.current_position[0]:.1f}, {self.current_position[1]:.1f}, {self.current_position[2]:.1f}] | "
                     f"Ref: [{self.ref_position[0]:.1f}, {self.ref_position[1]:.1f}, {self.ref_position[2]:.1f}] | "
                     f"Err: {err:.2f}m | Vel: {vel_norm:.2f} m/s | Acc: {acc_norm:.2f} m/s²"
                 )
             else:
                 rospy.loginfo(
-                    f"[MPC ACTIVE] Hovering dekat posisi sekarang, belum ada trajectory reference."
+                    f"[MPC POS-ONLY ACTIVE] Hovering, waiting for position reference."
                 )
         else:
             rospy.loginfo_throttle(
                 2.0,
-                f"[MPC STANDBY] mode={self.current_state.mode}, armed={self.armed}, "
-                f"ref_pose={'OK' if self.ref_pose_received else 'NO'}, "
-                f"ref_vel={'OK' if self.ref_vel_received else 'NO'}"
+                f"[MPC POS-ONLY STANDBY] mode={self.current_state.mode}, armed={self.armed}, "
+                f"ref_pose={'OK' if self.ref_pose_received else 'NO'}"
             )
 
     # ===================== Helpers =====================
@@ -557,9 +568,9 @@ class MPCTrajectoryFollowerManualROS1:
 
 
 def main():
-    rospy.init_node("mpc_trajectory_follower_manual", anonymous=False)
-    node = MPCTrajectoryFollowerManualROS1()
-    rospy.loginfo("MPC Trajectory Follower ROS1 (manual OFFBOARD) started.")
+    rospy.init_node("mpc_position_only", anonymous=False)
+    node = MPCPositionOnlyROS1()
+    rospy.loginfo("MPC Position-Only Controller ROS1 started.")
     rospy.spin()
 
 
