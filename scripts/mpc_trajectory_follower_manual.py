@@ -68,7 +68,7 @@ class MPCPositionController:
             6.0, 6.0, 12.0     # kecepatan
         ])
 
-        self.R = np.diag([0.30, 0.30, 0.10])     # penalti besarnya u
+        self.R = np.diag([0.6, 0.6, 0.10])     # penalti besarnya u
         self.R_delta = np.diag([0.12, 0.12, 0.06])  # penalti perubahan u
 
         self.u_prev = np.zeros(self.nu)
