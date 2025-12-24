@@ -34,7 +34,7 @@ class MPCPositionController:
     3 control inputs: [ax, ay, az] (perintah akselerasi)
     """
 
-    def __init__(self, dt=0.1, Np=10, Nc=3):
+    def __init__(self, dt=0.1, Np=4, Nc=3):
         self.dt = dt
         self.Np = Np
         self.Nc = Nc
