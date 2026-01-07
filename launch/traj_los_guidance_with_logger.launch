@@ -122,6 +122,12 @@
         <param name="diamond_points_per_side" value="$(arg diamond_points_per_side)"/>
     </node>
 
+    <node name="mpc_trajectory_follower_manual"
+          pkg="mpc_offboard"
+          type="mpc_trajectory_follower_manual.py"
+          output="screen">
+    </node>
+
     <!-- ============== Data Logger ============== -->
     <node pkg="mpc_offboard" type="data_logger_los_guidance.py" 
           name="los_data_logger" output="screen">
