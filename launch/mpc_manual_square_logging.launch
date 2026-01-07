@@ -11,7 +11,7 @@
 
   <!-- ==== PARAMETER TRAJECTORY SQUARE ==== -->
   <arg name="waypoint_mode"          default="square"/>
-  <arg name="ref_speed"              default="1.0"/>
+  <arg name="ref_speed"              default="2.0"/>  
   <arg name="loop_trajectory"        default="false"/>
   <arg name="start_at_current_pose"  default="true"/>
 

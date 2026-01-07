@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 ############################################################################
 #
-#   MPC Trajectory Tracking Controller - IDENTIFIED MODEL (MAVROS, ROS1)
+#   MPC Trajectory Tracking Controller (MAVROS Version, ROS1)
 #   VARIAN MANUAL-OFFBOARD:
 #
 #   - ROS1 + mavros
-#   - MPC dengan IDENTIFIED MODEL dari system identification
-#   - State: [x, y, z, vx, vy, vz, roll, pitch, yaw, ...]
-#   - Control inputs: [thrust, roll_cmd, pitch_cmd, yaw_rate_cmd]
+#   - MPC 6-state: [x, y, z, vx, vy, vz]
 #   - Input referensi dari trajectory publisher:
 #       /trajectory/ref_pose (PoseStamped, ENU)
 #       /trajectory/ref_vel  (TwistStamped, ENU)
-#   - Output: LANGSUNG ke /mavros/setpoint_raw/attitude
-#   - TIDAK ADA konversi acceleration → attitude
+#   - Output: acceleration [ax, ay, az] (NED)
+#   - Dikonversi ke Attitude + Thrust → /mavros/setpoint_raw/attitude
 #
-#   PERBEDAAN DENGAN MPC LINEARIZED:
-#   - Model: Identified dari data flight test (bukan linearisasi fisika)
-#   - Control output: thrust + attitude setpoint (bukan akselerasi)
-#   - Lebih akurat untuk karakteristik drone spesifik
+#   PERBEDAAN UTAMA:
+#   - TIDAK ada pemanggilan service ARM / OFFBOARD dari kode ini.
+#   - Pilot harus set mode OFFBOARD + ARM manual (QGC / RC).
+#   - Node hanya mengontrol bila mode=OFFBOARD dan armed=True.
 #
 ############################################################################
 
@@ -25,19 +23,15 @@ import rospy
 import numpy as np
 import quadprog  # pastikan sudah: pip3 install quadprog
 
-from geometry_msgs.msg import PoseStamped, TwistStamped
+from geometry_msgs.msg import PoseStamped, TwistStamped, Vector3Stamped
 from mavros_msgs.msg import State, AttitudeTarget
-from mavros_msgs.srv import CommandBool, CommandBoolRequest, SetMode, SetModeRequest
 
 
-class MPCIdentifiedModelController:
+class MPCPositionController:
     """
-    MPC Controller dengan Identified Model
-    State: [x, y, z, vx, vy, vz]
-    Control inputs: [thrust, roll_cmd, pitch_cmd]
-    Yaw setpoint diambil langsung dari trajectory publisher
-    
-    TODO: Isi matrices A, B dari hasil system identification!
+    MPC Controller untuk posisi
+    6-state model: [x, y, z, vx, vy, vz]
+    3 control inputs: [ax, ay, az] (perintah akselerasi)
     """
 
     def __init__(self, dt=0.1, Np=10, Nc=3):
@@ -45,196 +39,192 @@ class MPCIdentifiedModelController:
         self.Np = Np
         self.Nc = Nc
         self.nx = 6  # [x, y, z, vx, vy, vz]
-        self.nu = 3  # [thrust, roll_cmd, pitch_cmd]
+        self.nu = 3  # [ax, ay, az]
+        self.ny = 6
 
-        # =====================================================
-        # TODO: ISI MATRICES INI DARI HASIL SYSTEM IDENTIFICATION!
-        # =====================================================
-        # Format: x(k+1) = A * x(k) + B * u(k)
-        # A: state transition matrix (nx x nx)
-        # B: control input matrix (nx x nu)
-        
-        # PLACEHOLDER - GANTI DENGAN NILAI DARI SYSTEM ID!
+        # System matrices (integrator model)
         self.A = np.array([
-            [ 0.5864, -0.6465, -0.4143,  0.4367,  0.1764, -0.0050],
-            [-0.1166,  0.5842, -0.4205,  0.4351,  0.0547, -0.4754],
-            [ 0.2085,  0.2632,  1.0974, -0.2010, -0.0732,  0.1140],
-            [ 0.0455,  0.2284,  0.2584,  0.7459, -0.0253,  0.2619],
-            [ 0.3394,  0.1967, -0.1062,  0.1012,  0.8524, -0.6981],
-            [ 0.0006,  0.0007,  0.0005, -0.0004, -0.0002,  0.9901]
+            [ 0.8466, -0.0199, -0.0872, -0.3844,  0.1243, -0.0691],
+            [-0.1412,  0.9148,  0.2003,  0.5171,  0.0769, -0.1062],
+            [-0.1246,  0.0833,  0.7456,  0.3590,  0.1191, -0.2293],
+            [ 0.0847,  0.1861, -0.5376,  0.2823, -0.0075,  0.0029],
+            [ 0.5122,  0.2011, -0.1131,  0.6821,  0.6349,  0.1693],
+            [ 0.0284,  0.0360, -0.0677,  0.0479, -0.0137,  0.9840]
         ])
 
         self.B = np.array([
-            [ 0.4493, -0.5665,  0.0252],
-            [ 0.9590, -0.2516,  0.0868],
-            [ 0.1606,  0.2756, -0.0070],
-            [-1.2863,  0.1229, -0.0522],
-            [ 2.3782,  0.3360,  0.0965],
-            [ 0.0000,  0.0008,  0.0000]
+            [ 0.5474, -0.0303,  0.0552],
+            [-0.6505,  0.9932,  0.0180],
+            [-0.0803,  0.4950, -0.0724],
+            [ 1.1842, -1.2920, -0.0637],
+            [-0.8348, -0.7579, -0.2078],
+            [-0.0004, -0.0768, -0.0278]
+        ])
+
+        self.C = np.array([
+            [-0.0556,  0.0752, -0.0631,  0.0756,  0.0179,  0.3206],
+            [ 0.3893, -0.2788,  0.1101, -0.0796,  0.1753, -0.5110],
+            [ 2.0979, -2.7923,  0.9086, -2.2039,  0.3418,  2.4475],
+            [-0.5029, -0.0035, -0.0247,  0.1059, -0.1650, -0.0750],
+            [-0.4829,  0.4901, -0.3408,  0.3317, -0.2023,  0.8717],
+            [ 3.5957,  1.1492, -0.0847,  0.1998,  1.6340, -4.9695]
         ])
         
-        # Contoh struktur yang mungkin (sesuaikan dengan hasil identification):
-        # self.A = np.array([
-        #     [a11, a12, ..., a16],
-        #     [a21, a22, ..., a26],
-        #     ...
-        #     [a61, a62, ..., a66]
-        # ])
-        # 
-        # self.B = np.array([
-        #     [b11, b12, b13],  # efek thrust, roll, pitch ke dx
-        #     [b21, b22, b23],  # efek ke dy
-        #     ...
-        #     [b61, b62, b63]   # efek ke dvz
-        # ])
-
-        self.C = np.eye(self.nx)
-
-        # Cost matrices - TUNING SESUAI KEBUTUHAN
-        self.Q = np.diag([
-            70.0, 70.0, 150.0,   # posisi x,y,z
-            6.0, 6.0, 90.0       # kecepatan vx,vy,vz
+        self.L = np.array([
+            [ 0.0090, -0.0050,  0.1009, -0.0302,  0.0188,  0.0859],
+            [ 0.0252, -0.0487, -0.1358, -0.0247,  0.0815, -0.0012],
+            [-0.0079,  0.0024, -0.0469,  0.0082, -0.0303,  0.0065],
+            [ 0.0237, -0.0126,  0.0300,  0.0190,  0.0663,  0.0135],
+            [ 0.0180, -0.0191, -0.0155, -0.0216,  0.0669, -0.0140],
+            [ 0.0434, -0.0439,  0.0529, -0.0441,  0.1110, -0.0796]
         ])
+        
+        self.xhat = np.zeros(self.nx)
+        self.u_prev = np.zeros(self.nu)
 
-        self.R = np.diag([0.1, 0.5, 0.5])  # penalti [thrust, roll, pitch]
-        self.R_delta = np.diag([0.2, 0.8, 0.8])  # penalti perubahan control
+
+        # Cost matrices - SAFE MODE REAL FLIGHT
+        self.Qy = np.diag([50, 50, 120, 6, 6, 60])   # output weights
+        self.R  = np.diag([0.3, 0.3, 0.1])
+        self.Rd = np.diag([0.12, 0.12, 0.06])
 
         self.u_prev = np.zeros(self.nu)
-        
-        # Control constraints
-        self.thrust_min = 0.0
-        self.thrust_max = 1.0
-        self.roll_max = np.radians(25.0)   # rad
-        self.pitch_max = np.radians(25.0)  # rad
+        self.a_max = 4.0  # m/s^2
 
         self._build_prediction_matrices()
 
     def _build_prediction_matrices(self):
-        """Build prediction matrices untuk MPC"""
-        # Phi matrix (state prediction)
-        self.Phi = np.zeros((self.Np*self.nx, self.nx))
+        # Phi_y : maps x(k) -> Y prediction
+        self.Phi_y = np.zeros((self.Np*self.ny, self.nx))
         A_power = np.eye(self.nx)
+
         for i in range(self.Np):
             A_power = A_power @ self.A
-            self.Phi[i*self.nx:(i+1)*self.nx, :] = A_power
+            self.Phi_y[i*self.ny:(i+1)*self.ny, :] = self.C @ A_power
 
-        # Gamma matrix (control effect)
-        self.Gamma = np.zeros((self.Np*self.nx, self.Nc*self.nu))
+        # Gamma_y : maps U -> Y prediction
+        self.Gamma_y = np.zeros((self.Np*self.ny, self.Nc*self.nu))
+
         for i in range(self.Np):
             for j in range(min(i+1, self.Nc)):
                 A_power = np.eye(self.nx)
-                for _ in range(i - j):
+                for _ in range(i-j):
                     A_power = A_power @ self.A
-                self.Gamma[i*self.nx:(i+1)*self.nx, j*self.nu:(j+1)*self.nu] = A_power @ self.B
+                self.Gamma_y[
+                    i*self.ny:(i+1)*self.ny,
+                    j*self.nu:(j+1)*self.nu
+                ] = self.C @ A_power @ self.B
 
         self._build_qp_matrices()
 
     def _build_qp_matrices(self):
-        """Build QP problem matrices"""
-        Q_bar = np.kron(np.eye(self.Np), self.Q)
+        Q_bar = np.kron(np.eye(self.Np), self.Qy)
         R_bar = np.kron(np.eye(self.Nc), self.R)
-        
-        # Delta-u matrices for control rate penalty
-        M = np.zeros((self.Nc*self.nu, self.Nc*self.nu))
+
+        # delta-u penalty
+        Rd_bar = np.zeros((self.Nc*self.nu, self.Nc*self.nu))
         for i in range(self.Nc):
-            M[i*self.nu:(i+1)*self.nu, i*self.nu:(i+1)*self.nu] = np.eye(self.nu)
+            Rd_bar[i*self.nu:(i+1)*self.nu,
+                   i*self.nu:(i+1)*self.nu] = self.Rd
             if i > 0:
-                M[i*self.nu:(i+1)*self.nu, (i-1)*self.nu:i*self.nu] = -np.eye(self.nu)
+                Rd_bar[i*self.nu:(i+1)*self.nu,
+                       (i-1)*self.nu:i*self.nu] = -self.Rd
+                Rd_bar[(i-1)*self.nu:i*self.nu,
+                       i*self.nu:(i+1)*self.nu] = -self.Rd
 
-        R_delta_bar = M.T @ np.kron(np.eye(self.Nc), self.R_delta) @ M
+        H = self.Gamma_y.T @ Q_bar @ self.Gamma_y + R_bar + Rd_bar
+        self.H = 0.5*(H + H.T) 
 
-        self.H = 2.0 * (self.Gamma.T @ Q_bar @ self.Gamma + R_bar + R_delta_bar)
-        self.H = 0.5 * (self.H + self.H.T)  # symmetrize
+        self.Q_bar = Q_bar
+        self.Rd_bar = Rd_bar
 
-        self.Gamma_T_Q = self.Gamma.T @ Q_bar
-        self.M_T_Rd = M.T @ np.kron(np.eye(self.Nc), self.R_delta)
-
-    def compute_control(self, x, x_ref):
+    def compute_control(self, y_meas, y_ref):
         """
-        Compute optimal control using MPC
-        
-        Args:
-            x: current state [x,y,z,vx,vy,vz] (NED)
-            x_ref: reference state [x,y,z,vx,vy,vz] (NED)
-            
-        Returns:
-            u: control [thrust, roll_cmd, pitch_cmd, yaw_rate_cmd]
+        y_meas : measured output (ny,)
+        y_ref  : reference output (ny,)
         """
+
+        # ================== KALMAN OBSERVER ==================
+        # prediction
+        self.xhat = self.A @ self.xhat + self.B @ self.u_prev
+
+        # correction
+        y_hat = self.C @ self.xhat
+        self.xhat = self.xhat + self.L @ (y_meas - y_hat)
+
+        # ================== MPC OPTIMIZATION =================
+        r = np.tile(y_ref, self.Np)
+
+        y_pred = self.Phi_y @ self.xhat
+        err_pred = y_pred - r
+
+        u_prev_ext = np.tile(self.u_prev, self.Nc)
+
+        f_tracking = self.Gamma_y.T @ self.Q_bar @ err_pred
+        f_rate = -self.Rd_bar @ u_prev_ext
+        f = f_tracking + f_rate
+
+        # unconstrained example
         try:
-            # Error
-            e = x - x_ref
-            
-            # Reference trajectory (constant reference)
-            x_ref_bar = np.tile(x_ref, self.Np)
-            
-            # Prediction error
-            e_pred = self.Phi @ e
-            
-            # QP objective: f = Gamma^T Q (Phi e + Gamma U - x_ref_bar) + R U + R_delta M U
-            f_temp = self.Gamma_T_Q @ (e_pred - x_ref_bar)
-            
-            # Delta-u term
-            u_rep = np.tile(self.u_prev, self.Nc)
-            f_delta = self.M_T_Rd @ u_rep
-            
-            f = f_temp + f_delta
-            
-            # Constraints: lower_bound <= u <= upper_bound
-            # Format: G * U >= h
-            n_vars = self.Nc * self.nu
-            
-            # Build constraint matrices
-            # Upper bounds: -u <= -lower
-            # Lower bounds: u <= upper
-            G_list = []
-            h_list = []
-            
-            for i in range(self.Nc):
-                # Thrust constraints
-                G_thrust = np.zeros((2, n_vars))
-                G_thrust[0, i*self.nu] = -1.0  # -thrust >= -thrust_max
-                G_thrust[1, i*self.nu] = 1.0   # thrust >= thrust_min
-                G_list.append(G_thrust)
-                h_list.extend([-self.thrust_max, self.thrust_min])
-                
-                # Roll constraints
-                G_roll = np.zeros((2, n_vars))
-                G_roll[0, i*self.nu+1] = -1.0
-                G_roll[1, i*self.nu+1] = 1.0
-                G_list.append(G_roll)
-                h_list.extend([-self.roll_max, -self.roll_max])
-                
-                # Pitch constraints
-                G_pitch = np.zeros((2, n_vars))
-                G_pitch[0, i*self.nu+2] = -1.0
-                G_pitch[1, i*self.nu+2] = 1.0
-                G_list.append(G_pitch)
-                h_list.extend([-self.pitch_max, -self.pitch_max])
-            
-            G = np.vstack(G_list)
-            h = np.array(h_list)
-            
-            # Solve QP
-            sol = quadprog.solve_qp(self.H, -f, -G.T, -h, meq=0)
-            U_opt = sol[0]
-            
-            u = U_opt[:self.nu]
-            
-            # Clip for safety
-            u[0] = np.clip(u[0], self.thrust_min, self.thrust_max)
-            u[1] = np.clip(u[1], -self.roll_max, self.roll_max)
-            u[2] = np.clip(u[2], -self.pitch_max, self.pitch_max)
-            
+            u_opt = quadprog.solve_qp(self.H, -f)[0]
+            u = u_opt[:self.nu]
             self.u_prev = u.copy()
             return u
 
         except Exception as e:
-            rospy.logwarn(f"MPC QP failed: {e}")
+            print("QP failed:", e)
             return np.zeros(self.nu)
 
 
+def acceleration_to_attitude_thrust_px4(accel_ned, yaw_desired, hover_thrust=0.35, gravity=9.81):
+    ax, ay, az = accel_ned
+
+    # COMMENT untuk test constraint MPC murni
+    ax = np.clip(ax, -8.0, 8.0)
+    ay = np.clip(ay, -8.0, 8.0)
+    az = np.clip(az, -8.0, 8.0)
+
+    specific_force = np.array([ax, ay, az - gravity])
+
+    thrust_mag = np.linalg.norm(specific_force)
+    if thrust_mag < gravity:
+        thrust_mag = gravity
+
+    body_z = -specific_force / np.linalg.norm(specific_force)
+
+    thrust_norm = (thrust_mag / gravity) * hover_thrust
+    thrust_norm = np.clip(thrust_norm, hover_thrust*0.5, 1.0)
+
+    if np.linalg.norm(body_z) < 1e-8:
+        body_z = np.array([0.0, 0.0, 1.0])
+    body_z = body_z / np.linalg.norm(body_z)
+
+    y_C = np.array([-np.sin(yaw_desired), np.cos(yaw_desired), 0.0])
+    body_x = np.cross(y_C, body_z)
+
+    if body_z[2] < 0.0:
+        body_x = -body_x
+
+    if abs(body_z[2]) < 1e-6:
+        body_x = np.array([0.0, 0.0, 1.0])
+
+    body_x = body_x / np.linalg.norm(body_x)
+    body_y = np.cross(body_z, body_x)
+
+    R = np.column_stack([body_x, body_y, body_z])
+
+    roll = np.arctan2(R[2, 1], R[2, 2])
+    pitch = np.arcsin(-np.clip(R[2, 0], -1.0, 1.0))
+    yaw = np.arctan2(R[1, 0], R[0, 0])
+
+    max_tilt = np.radians(30.0)
+    roll = np.clip(roll, -max_tilt, max_tilt)
+    pitch = np.clip(pitch, -max_tilt, max_tilt)
+
+    return roll, pitch, yaw, thrust_norm, R
+
+
 def quaternion_to_euler(q):
-    """Convert quaternion [w,x,y,z] to euler angles [roll, pitch, yaw]"""
     w, x, y, z = q
 
     sinr_cosp = 2.0*(w*x + y*z)
@@ -254,71 +244,39 @@ def quaternion_to_euler(q):
     return roll, pitch, yaw
 
 
-def euler_to_quaternion(roll, pitch, yaw):
-    """Convert euler angles to quaternion [x,y,z,w] (ENU convention)"""
-    cy = np.cos(yaw * 0.5)
-    sy = np.sin(yaw * 0.5)
-    cp = np.cos(pitch * 0.5)
-    sp = np.sin(pitch * 0.5)
-    cr = np.cos(roll * 0.5)
-    sr = np.sin(roll * 0.5)
-    
-    qw = cr * cp * cy + sr * sp * sy
-    qx = sr * cp * cy - cr * sp * sy
-    qy = cr * sp * cy + sr * cp * sy
-    qz = cr * cp * sy - sr * sp * cy
-    
-    return np.array([qx, qy, qz, qw], dtype=float)
-
-
-class MPCIdentifiedModelFollowerROS1:
+class MPCTrajectoryFollowerManualROS1:
     """
-    ROS1 Node untuk MPC dengan Identified Model
-    - Terima trajectory reference dari trajectory publisher
-    - Jalankan MPC dengan identified model
-    - Kirim thrust + attitude setpoint LANGSUNG ke MAVROS
+    Versi TRAJECTORY TRACKING MANUAL-OFFBOARD:
+    - Referensi posisi + yaw dari /trajectory/ref_pose (ENU)
+    - Referensi kecepatan dari /trajectory/ref_vel (ENU)
+    - MPC tracking state x = [pos_ned, vel_ned] → x_ref dari traj
+    - Mode OFFBOARD + ARM diatur manual oleh pilot (QGC / RC).
+    - Node hanya mengontrol saat mode=OFFBOARD dan armed=True.
     """
 
     def __init__(self):
-        rospy.init_node("mpc_identified_model_follower_auto", anonymous=False)
-        
+        self.node_name = "mpc_trajectory_follower_manual"
         rospy.loginfo("="*60)
-        rospy.loginfo("MPC Identified Model Follower (ROS1 + MAVROS) - AUTO OFFBOARD/ARM")
+        rospy.loginfo("MPC Trajectory Tracking (ROS1 + MAVROS) - MANUAL OFFBOARD")
         rospy.loginfo("Input ref: /trajectory/ref_pose & /trajectory/ref_vel")
-        rospy.loginfo("Output   : /mavros/setpoint_raw/attitude (DIRECT)")
-        rospy.loginfo("Mode & ARM: AUTO via MAVROS services")
+        rospy.loginfo("Output   : /mavros/setpoint_raw/attitude")
+        rospy.loginfo("Mode & ARM dikendalikan manual dari QGC/RC")
         rospy.loginfo("MPC Optimization: 10 Hz | Control Output: 50 Hz")
         rospy.loginfo("="*60)
 
-        # ===================== PARAMETER MPC =====================
-        mpc_dt = rospy.get_param("~mpc_dt", 0.1)
-        mpc_Np = int(rospy.get_param("~mpc_Np", 10))
-        mpc_Nc = int(rospy.get_param("~mpc_Nc", 3))
+        # MPC core
+        self.mpc = MPCPositionController(dt=0.1, Np=10, Nc=3)
+        rospy.loginfo("MPC Controller initialized: dt=0.1s, Np=6, Nc=3")
 
-        self.mpc = MPCIdentifiedModelController(dt=mpc_dt, Np=mpc_Np, Nc=mpc_Nc)
-        rospy.loginfo("MPC Controller initialized: dt=%.2fs, Np=%d, Nc=%d", mpc_dt, mpc_Np, mpc_Nc)
-
-        # ===================== AUTO MODE PARAMETERS =====================
-        self.auto_arm_offboard = rospy.get_param("~auto_arm_offboard", True)
-        self.setpoint_stream_duration = rospy.get_param("~setpoint_stream_duration", 2.0)  # seconds
-
-        # ===================== STATE MAVROS =====================
+        # State MAVROS
         self.current_state = State()
-        self.offboard_mode = False
         self.armed = False
-        
-        # State machine for auto arm/offboard
-        self.auto_mode_enabled = False
-        self.setpoint_stream_start = None
-        self.offboard_requested = False
-        self.arm_requested = False
+        self.offboard_mode = False
 
         # State UAV (NED)
         self.current_position = np.zeros(3)      # [N,E,D]
         self.current_velocity = np.zeros(3)      # [vN,vE,vD]
         self.current_orientation = np.array([1.0, 0.0, 0.0, 0.0])  # w,x,y,z
-        self.current_yaw = 0.0
-        self.yaw_initialized = False
 
         # Trajectory reference (NED)
         self.ref_position = np.array([0.0, 0.0, -2.5])
@@ -328,19 +286,15 @@ class MPCIdentifiedModelFollowerROS1:
         self.ref_pose_received = False
         self.ref_vel_received = False
 
-        # Output MPC (DIRECT attitude + thrust)
-        self.control_thrust = 0.35
-        self.control_roll = 0.0
-        self.control_pitch = 0.0
-        # Yaw diambil dari trajectory publisher
+        # Output MPC (aks NED) + attitude hasil konversi
+        self.mpc_acceleration = np.zeros(3)
+        self.attitude_roll = 0.0
+        self.attitude_pitch = 0.0
         self.attitude_yaw = 0.0
+        self.attitude_thrust = 0.35
+        self.attitude_R_matrix = np.eye(3)
 
         self.setpoint_counter = 0
-
-        # ===================== PUBLISHERS =====================
-        self.attitude_pub = rospy.Publisher(
-            "/mavros/setpoint_raw/attitude", AttitudeTarget, queue_size=10
-        )
 
         # ===================== SUBSCRIBERS =====================
         self.state_sub = rospy.Subscriber(
@@ -361,40 +315,45 @@ class MPCIdentifiedModelFollowerROS1:
             "/trajectory/ref_vel", TwistStamped, self.traj_vel_callback, queue_size=10
         )
 
-        # ===================== SERVICE CLIENTS =====================
-        rospy.loginfo("Waiting for MAVROS services...")
-        rospy.wait_for_service("/mavros/cmd/arming")
-        rospy.wait_for_service("/mavros/set_mode")
+        # ===================== PUBLISHERS =====================
+        self.attitude_pub = rospy.Publisher(
+            "/mavros/setpoint_raw/attitude", AttitudeTarget, queue_size=20
+        )
         
-        self.arming_client = rospy.ServiceProxy("/mavros/cmd/arming", CommandBool)
-        self.set_mode_client = rospy.ServiceProxy("/mavros/set_mode", SetMode)
-        rospy.loginfo("✓ MAVROS services connected")
+        # Publisher untuk MPC acceleration output (NED frame)
+        self.accel_pub = rospy.Publisher(
+            "/control/mpc_acceleration", Vector3Stamped, queue_size=20
+        )
 
         # ===================== TIMERS =====================
         self.mpc_timer = rospy.Timer(rospy.Duration(0.1), self.mpc_callback)    # 10 Hz
         self.ctrl_timer = rospy.Timer(rospy.Duration(0.02), self.control_loop)  # 50 Hz
         self.sm_timer = rospy.Timer(rospy.Duration(0.5), self.state_monitor_callback)  # 2 Hz
 
-        # Start setpoint streaming for auto mode
-        if self.auto_arm_offboard:
-            self.setpoint_stream_start = rospy.Time.now()
-            self.auto_mode_enabled = True
-            rospy.loginfo("🚀 Auto ARM/OFFBOARD enabled - streaming setpoints...")
+    # ===================== Callbacks =====================
 
-        rospy.loginfo("MPC Identified Model Follower ROS1 (auto OFFBOARD) started.")
-
-    # ===================== State & sensor callbacks =====================
     def state_callback(self, msg: State):
-        self.current_state = msg
-        self.offboard_mode = (msg.mode == "OFFBOARD")
-        self.armed = msg.armed
+        prev_armed = self.armed
+        prev_offboard = self.offboard_mode
 
-        if self.offboard_mode and not hasattr(self, '_offboard_logged'):
-            self._offboard_logged = True
-            rospy.loginfo("✓ OFFBOARD MODE ACTIVE (set manual)")
+        self.current_state = msg
+        self.armed = msg.armed
+        self.offboard_mode = (msg.mode == "OFFBOARD")
+
+        if prev_armed != self.armed:
+            if self.armed:
+                rospy.loginfo("✓ ARMED (dari pilot/QGC)")
+            else:
+                rospy.logwarn("✗ DISARMED")
+
+        if prev_offboard != self.offboard_mode:
+            if self.offboard_mode:
+                rospy.loginfo("✓ OFFBOARD MODE ACTIVE (set manual)")
+            else:
+                rospy.logwarn("✗ OFFBOARD MODE INACTIVE")
 
     def local_pose_callback(self, msg: PoseStamped):
-        """ENU → NED"""
+        # ENU → NED
         self.current_position[0] = msg.pose.position.y      # N
         self.current_position[1] = msg.pose.position.x      # E
         self.current_position[2] = -msg.pose.position.z     # D
@@ -405,43 +364,42 @@ class MPCIdentifiedModelFollowerROS1:
             msg.pose.orientation.y,
             msg.pose.orientation.z
         ])
-        
-        # Update current yaw from quaternion
-        _, _, yaw_rad = quaternion_to_euler(self.current_orientation)
-        self.current_yaw = yaw_rad
-        
-        # Mark yaw as initialized after first pose update
-        if not self.yaw_initialized:
-            self.yaw_initialized = True
-            rospy.loginfo("✅ Current yaw initialized: %.1f°", np.degrees(self.current_yaw))
 
     def local_vel_callback(self, msg: TwistStamped):
-        """ENU → NED"""
+        # ENU → NED
         self.current_velocity[0] = msg.twist.linear.y
         self.current_velocity[1] = msg.twist.linear.x
         self.current_velocity[2] = -msg.twist.linear.z
 
     def traj_pose_callback(self, msg: PoseStamped):
-        """Pose referensi dari trajectory publisher (ENU) → simpan di NED"""
+        """
+        Pose referensi dari trajectory publisher (ENU) → simpan di NED
+        """
+        # Posisi ENU → NED
         n = msg.pose.position.y
         e = msg.pose.position.x
         d = -msg.pose.position.z
         self.ref_position = np.array([n, e, d])
 
-        # Extract yaw from quaternion
-        qw = msg.pose.orientation.w
-        qx = msg.pose.orientation.x
-        qy = msg.pose.orientation.y
-        qz = msg.pose.orientation.z
-        _, _, yaw_rad = quaternion_to_euler([qw, qx, qy, qz])
-        self.ref_yaw = yaw_rad
+        # Yaw dari quaternion
+        q = [
+            msg.pose.orientation.w,
+            msg.pose.orientation.x,
+            msg.pose.orientation.y,
+            msg.pose.orientation.z
+        ]
+        _, _, yaw = quaternion_to_euler(q)
+        self.ref_yaw = yaw
 
         if not self.ref_pose_received:
             self.ref_pose_received = True
             rospy.loginfo("✅ Trajectory pose reference received.")
 
     def traj_vel_callback(self, msg: TwistStamped):
-        """Velocity referensi dari trajectory publisher (ENU) → simpan di NED"""
+        """
+        Velocity referensi dari trajectory publisher (ENU) → simpan di NED
+        """
+        # ENU vel: [vx, vy, vz] → NED: [vn, ve, vd]
         vn = msg.twist.linear.y
         ve = msg.twist.linear.x
         vd = -msg.twist.linear.z
@@ -452,18 +410,13 @@ class MPCIdentifiedModelFollowerROS1:
             rospy.loginfo("✅ Trajectory velocity reference received.")
 
     # ===================== MPC timer =====================
+
     def mpc_callback(self, event):
-        """Run MPC optimization at 10 Hz"""
         # MPC hanya aktif jika mode OFFBOARD & armed
         if not (self.offboard_mode and self.armed):
             return
-        
-        # Wait until yaw is initialized before sending control commands
-        if not self.yaw_initialized:
-            rospy.logwarn_throttle(2.0, "⏳ Waiting for yaw initialization...")
-            return
 
-        # Jika belum ada trajectory ref, hover di posisi sekarang
+        # Jika belum ada trajectory ref, tahan dekat posisi sekarang (hover pada z=-5m)
         if not self.ref_pose_received:
             self.ref_position[0] = self.current_position[0]
             self.ref_position[1] = self.current_position[1]
@@ -477,60 +430,78 @@ class MPCIdentifiedModelFollowerROS1:
         x = np.concatenate([self.current_position, self.current_velocity])
         x_ref = np.concatenate([self.ref_position, self.ref_velocity])
 
-        # Run MPC
-        u = self.mpc.compute_control(x, x_ref)
+        acc = self.mpc.compute_control(x, x_ref)
+        self.mpc_acceleration = acc
         
-        # Extract control outputs: [thrust, roll, pitch]
-        self.control_thrust = float(u[0])
-        self.control_roll = float(u[1])
-        self.control_pitch = float(u[2])
-        
-        # Yaw diambil dari trajectory reference (bukan dari MPC)
-        self.attitude_yaw = self.ref_yaw
+        # Publish acceleration output (NED frame)
+        accel_msg = Vector3Stamped()
+        accel_msg.header.stamp = rospy.Time.now()
+        accel_msg.header.frame_id = "base_link_ned"
+        accel_msg.vector.x = float(acc[0])  # ax (North)
+        accel_msg.vector.y = float(acc[1])  # ay (East)
+        accel_msg.vector.z = float(acc[2])  # az (Down)
+        self.accel_pub.publish(accel_msg)
+
+        roll, pitch, yaw, thrust, R = acceleration_to_attitude_thrust_px4(
+            acc, self.ref_yaw, hover_thrust=0.35, gravity=9.81
+        )
+
+        self.attitude_roll = roll
+        self.attitude_pitch = pitch
+        self.attitude_yaw = yaw
+        self.attitude_thrust = thrust
+        self.attitude_R_matrix = R
 
         pos_err = np.linalg.norm(self.ref_position - self.current_position)
         vel_err = np.linalg.norm(self.ref_velocity - self.current_velocity)
 
         rospy.loginfo_throttle(
             1.0,
-            f"🎯 MPC IDENTIFIED MODEL:\n"
+            f"🎯 MPC TRAJ STATE:\n"
             f"   Pos: [{self.current_position[0]:.1f}, {self.current_position[1]:.1f}, {self.current_position[2]:.1f}] → "
             f"[{self.ref_position[0]:.1f}, {self.ref_position[1]:.1f}, {self.ref_position[2]:.1f}] | Err: {pos_err:.2f}m\n"
             f"   Vel: [{self.current_velocity[0]:.2f}, {self.current_velocity[1]:.2f}, {self.current_velocity[2]:.2f}] → "
             f"[{self.ref_velocity[0]:.2f}, {self.ref_velocity[1]:.2f}, {self.ref_velocity[2]:.2f}] m/s | Err: {vel_err:.2f}\n"
-            f"   Control: Thrust={self.control_thrust:.3f}, Roll={np.degrees(self.control_roll):.1f}°, "
-            f"Pitch={np.degrees(self.control_pitch):.1f}°, Yaw={np.degrees(self.attitude_yaw):.1f}° (from traj)"
+            f"   Acc: [{acc[0]:.2f}, {acc[1]:.2f}, {acc[2]:.2f}] m/s² | Thrust: {thrust:.3f}"
         )
 
-    # ===================== Control loop (50Hz) =====================
+    # ===================== Attitude setpoint =====================
+
+    def rotmat_nedfrd_to_quat_enuflu(self, R_ned_from_body_frd: np.ndarray):
+        T_ENU_NED = np.array([
+            [0, 1, 0],
+            [1, 0, 0],
+            [0, 0,-1]
+        ], dtype=float)
+
+        T_FRD_FLU = np.diag([1, -1, -1]).astype(float)
+
+        R_enu_from_body_flu = T_ENU_NED @ R_ned_from_body_frd @ T_FRD_FLU
+        wxyz = self.rotation_matrix_to_quaternion(R_enu_from_body_flu)
+        return np.array([wxyz[1], wxyz[2], wxyz[3], wxyz[0]], dtype=float)
+
     def control_loop(self, event):
-        """Publish attitude setpoint at 50 Hz"""
+        """
+        Tetap publish attitude setpoint terus menerus (50 Hz).
+        PX4 akan memakai setpoint ini hanya ketika mode=OFFBOARD.
+        """
         att = AttitudeTarget()
         att.header.stamp = rospy.Time.now()
         att.header.frame_id = "map"
 
-        # Type mask: use attitude + thrust, ignore rates
         att.type_mask = (
             AttitudeTarget.IGNORE_ROLL_RATE |
             AttitudeTarget.IGNORE_PITCH_RATE |
             AttitudeTarget.IGNORE_YAW_RATE
         )
 
-        # Convert roll, pitch, yaw (from trajectory) to quaternion (ENU)
-        # Roll/pitch from MPC, yaw from trajectory publisher
-        q_xyzw = euler_to_quaternion(
-            self.control_roll,
-            self.control_pitch,
-            self.attitude_yaw  # Yaw dari trajectory publisher
-        )
+        q_xyzw = self.rotmat_nedfrd_to_quat_enuflu(self.attitude_R_matrix)
         att.orientation.x = float(q_xyzw[0])
         att.orientation.y = float(q_xyzw[1])
         att.orientation.z = float(q_xyzw[2])
         att.orientation.w = float(q_xyzw[3])
 
-        att.thrust = float(np.clip(self.control_thrust, 0.0, 1.0))
-        
-        # Body rates ignored (type_mask)
+        att.thrust = float(np.clip(self.attitude_thrust, 0.0, 1.0))
         att.body_rate.x = 0.0
         att.body_rate.y = 0.0
         att.body_rate.z = 0.0
@@ -540,76 +511,32 @@ class MPCIdentifiedModelFollowerROS1:
 
         if self.setpoint_counter % 50 == 0:
             rospy.loginfo(
-                f"📤 AttitudeTarget: thrust={att.thrust:.3f}, "
-                f"roll={np.degrees(self.control_roll):.1f}°, "
-                f"pitch={np.degrees(self.control_pitch):.1f}°, "
-                f"yaw={np.degrees(self.attitude_yaw):.1f}° (from traj)"
+                f"📤 AttitudeTarget ENU: thrust={att.thrust:.3f} "
+                f"q=[{att.orientation.x:.3f},{att.orientation.y:.3f},"
+                f"{att.orientation.z:.3f},{att.orientation.w:.3f}]"
             )
 
-    # ===================== State monitor =====================
+    # ===================== State monitor (tanpa command) =====================
+
     def state_monitor_callback(self, event):
         """
-        Monitor dan AUTO request OFFBOARD + ARM jika enabled
+        Hanya monitor status dan error, TANPA kirim perintah ARM / OFFBOARD.
+        Semua kontrol mode dilakukan manual oleh pilot.
         """
-        # Auto mode state machine
-        if self.auto_mode_enabled and self.auto_arm_offboard:
-            # Step 1: Stream setpoints untuk 2 detik sebelum request OFFBOARD
-            if self.setpoint_stream_start is not None:
-                elapsed = (rospy.Time.now() - self.setpoint_stream_start).to_sec()
-                if elapsed < self.setpoint_stream_duration:
-                    rospy.loginfo_throttle(1.0, f"⏳ Streaming setpoints... {elapsed:.1f}s / {self.setpoint_stream_duration:.1f}s")
-                    return
-                else:
-                    self.setpoint_stream_start = None  # Stop logging
-            
-            # Step 2: Request OFFBOARD mode
-            if not self.offboard_mode and not self.offboard_requested:
-                try:
-                    req = SetModeRequest()
-                    req.custom_mode = "OFFBOARD"
-                    resp = self.set_mode_client(req)
-                    if resp.mode_sent:
-                        rospy.loginfo("✓ OFFBOARD mode requested")
-                        self.offboard_requested = True
-                    else:
-                        rospy.logwarn("❌ Failed to request OFFBOARD mode")
-                except rospy.ServiceException as e:
-                    rospy.logerr(f"Service call failed: {e}")
-            
-            # Step 3: ARM drone setelah OFFBOARD aktif
-            if self.offboard_mode and not self.armed and not self.arm_requested:
-                rospy.sleep(0.5)  # Wait a bit after OFFBOARD
-                try:
-                    req = CommandBoolRequest()
-                    req.value = True
-                    resp = self.arming_client(req)
-                    if resp.success:
-                        rospy.loginfo("✓ ARM requested")
-                        self.arm_requested = True
-                    else:
-                        rospy.logwarn("❌ Failed to ARM")
-                except rospy.ServiceException as e:
-                    rospy.logerr(f"ARM service call failed: {e}")
-            
-            # Step 4: Confirm armed
-            if self.armed and self.arm_requested:
-                rospy.loginfo("🚁 DRONE ARMED - MPC control active!")
-                self.auto_mode_enabled = False  # Stop auto mode logic
-
-        # Regular status monitoring
         if self.offboard_mode and self.armed:
-            err = np.linalg.norm(self.ref_position - self.current_position)
+            err = np.linalg.norm(self.current_position - self.ref_position)
             vel_norm = np.linalg.norm(self.current_velocity)
+            acc_norm = np.linalg.norm(self.mpc_acceleration)
 
             if self.ref_pose_received:
                 rospy.loginfo(
                     f"[MPC ACTIVE] Pos: [{self.current_position[0]:.1f}, {self.current_position[1]:.1f}, {self.current_position[2]:.1f}] | "
                     f"Ref: [{self.ref_position[0]:.1f}, {self.ref_position[1]:.1f}, {self.ref_position[2]:.1f}] | "
-                    f"Err: {err:.2f}m | Vel: {vel_norm:.2f} m/s"
+                    f"Err: {err:.2f}m | Vel: {vel_norm:.2f} m/s | Acc: {acc_norm:.2f} m/s²"
                 )
             else:
                 rospy.loginfo(
-                    f"[MPC ACTIVE] Hovering near current position, waiting for trajectory reference."
+                    f"[MPC ACTIVE] Hovering dekat posisi sekarang, belum ada trajectory reference."
                 )
         else:
             rospy.loginfo_throttle(
@@ -619,10 +546,45 @@ class MPCIdentifiedModelFollowerROS1:
                 f"ref_vel={'OK' if self.ref_vel_received else 'NO'}"
             )
 
+    # ===================== Helpers =====================
 
-if __name__ == '__main__':
-    try:
-        controller = MPCIdentifiedModelFollowerROS1()
-        rospy.spin()
-    except rospy.ROSInterruptException:
-        pass
+    def rotation_matrix_to_quaternion(self, R):
+        trace = R[0, 0] + R[1, 1] + R[2, 2]
+
+        if trace > 0.0:
+            s = 0.5 / np.sqrt(trace + 1.0)
+            w = 0.25 / s
+            x = (R[2, 1] - R[1, 2]) * s
+            y = (R[0, 2] - R[2, 0]) * s
+            z = (R[1, 0] - R[0, 1]) * s
+        elif (R[0, 0] > R[1, 1]) and (R[0, 0] > R[2, 2]):
+            s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+            w = (R[2, 1] - R[1, 2]) / s
+            x = 0.25 * s
+            y = (R[0, 1] + R[1, 0]) / s
+            z = (R[0, 2] + R[2, 0]) / s
+        elif R[1, 1] > R[2, 2]:
+            s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+            w = (R[0, 2] - R[2, 0]) / s
+            x = (R[0, 1] + R[1, 0]) / s
+            y = 0.25 * s
+            z = (R[1, 2] + R[2, 1]) / s
+        else:
+            s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+            w = (R[1, 0] - R[0, 1]) / s
+            x = (R[0, 2] + R[2, 0]) / s
+            y = (R[1, 2] + R[2, 1]) / s
+            z = 0.25 * s
+
+        return np.array([w, x, y, z])
+
+
+def main():
+    rospy.init_node("mpc_trajectory_follower_manual", anonymous=False)
+    node = MPCTrajectoryFollowerManualROS1()
+    rospy.loginfo("MPC Trajectory Follower ROS1 (manual OFFBOARD) started.")
+    rospy.spin()
+
+
+if __name__ == "__main__":
+    main()

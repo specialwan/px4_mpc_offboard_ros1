@@ -1,4 +1,5 @@
 <launch>
+
   <!-- Trajectory Publisher: Circle -->
   <node pkg="mpc_offboard"
         type="trajectory_publisher_mavros_gated.py"
@@ -33,4 +34,21 @@
     <param name="acceptance_alt_tol"     value="0.5" />
     <param name="advance_on_reach"       value="false" />
   </node>
+
+  <!-- ==== NODE 2: MPC TRAJECTORY FOLLOWER MANUAL ==== -->
+  <node name="mpc_trajectory_follower_manual"
+        pkg="mpc_offboard"
+        type="mpc_trajectory_follower_manual.py"
+        output="screen">
+  </node>
+
+  <!-- ==== NODE 3: DATA LOGGER MAVROS TRAJ ==== -->
+  <node name="data_logger_mavros_traj"
+        pkg="mpc_offboard"
+        type="data_logger_mavros_traj.py"
+        output="screen">
+    <!-- Auto stop saat trajectory selesai -->
+    <param name="auto_stop_on_finish" value="true"/>
+  </node>
+
 </launch>

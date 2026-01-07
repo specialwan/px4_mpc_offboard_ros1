@@ -1,0 +1,136 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- 
+    LOS Guidance Trajectory Publisher Launch File
+    
+    Algoritma Line of Sight (LOS) untuk path following pada MPC.
+    Menghitung referensi velocity dan yaw berdasarkan:
+    - Cross-track error (jarak ke path)
+    - Along-track position
+    - Lookahead distance (adaptif)
+    -->
+
+    <!-- Trajectory mode: default, circle, square, helix, diamond -->
+    <arg name="waypoint_mode" default="square"/>
+    
+    <!-- LOS Guidance Parameters -->
+    <arg name="lookahead_distance" default="2.0"/>
+    <arg name="lookahead_min" default="1.0"/>
+    <arg name="lookahead_max" default="5.0"/>
+    <arg name="lookahead_adaptive" default="true"/>
+    <arg name="lookahead_speed_gain" default="0.5"/>
+    <arg name="los_integral_gain" default="0.1"/>
+    <arg name="cross_track_integral_max" default="2.0"/>
+    
+    <!-- Reference speed -->
+    <arg name="ref_speed" default="2.0"/>
+    <arg name="ref_speed_min" default="0.5"/>
+    
+    <!-- Altitude control -->
+    <arg name="altitude_gain" default="1.0"/>
+    <arg name="max_vertical_speed" default="1.5"/>
+    
+    <!-- General trajectory parameters -->
+    <arg name="loop_trajectory" default="false"/>
+    <arg name="start_at_current_pose" default="true"/>
+    
+    <!-- Altitude gate parameters -->
+    <arg name="hover_altitude" default="5.0"/>
+    <arg name="alt_tolerance" default="0.3"/>
+    <arg name="hover_stable_time" default="1.0"/>
+    <arg name="gate_on_altitude" default="true"/>
+    
+    <!-- Acceptance parameters -->
+    <arg name="acceptance_radius_xy" default="0.8"/>
+    <arg name="acceptance_alt_tol" default="0.5"/>
+    
+    <!-- Circle parameters -->
+    <arg name="circle_radius" default="10.0"/>
+    <arg name="circle_altitude" default="-5.0"/>
+    <arg name="circle_points" default="80"/>
+    
+    <!-- Square parameters -->
+    <arg name="square_size" default="15.0"/>
+    <arg name="square_altitude" default="-2.5"/>
+    <arg name="square_points_per_side" default="10"/>
+    
+    <!-- Helix parameters -->
+    <arg name="helix_radius" default="5.0"/>
+    <arg name="helix_start_altitude" default="-5.0"/>
+    <arg name="helix_end_altitude" default="-15.0"/>
+    <arg name="helix_turns" default="3.0"/>
+    <arg name="helix_points" default="120"/>
+    
+    <!-- Diamond parameters -->
+    <arg name="diamond_size" default="7.5"/>
+    <arg name="diamond_start_altitude" default="-5.0"/>
+    <arg name="diamond_end_altitude" default="-10.0"/>
+    <arg name="diamond_points_per_side" default="20"/>
+
+    <node pkg="mpc_offboard" type="trajectory_publisher_los_guidance.py" 
+          name="los_guidance_trajectory" output="screen">
+        
+        <!-- LOS Guidance Parameters -->
+        <param name="lookahead_distance" value="$(arg lookahead_distance)"/>
+        <param name="lookahead_min" value="$(arg lookahead_min)"/>
+        <param name="lookahead_max" value="$(arg lookahead_max)"/>
+        <param name="lookahead_adaptive" value="$(arg lookahead_adaptive)"/>
+        <param name="lookahead_speed_gain" value="$(arg lookahead_speed_gain)"/>
+        <param name="los_integral_gain" value="$(arg los_integral_gain)"/>
+        <param name="cross_track_integral_max" value="$(arg cross_track_integral_max)"/>
+        
+        <!-- Speed parameters -->
+        <param name="ref_speed" value="$(arg ref_speed)"/>
+        <param name="ref_speed_min" value="$(arg ref_speed_min)"/>
+        <param name="altitude_gain" value="$(arg altitude_gain)"/>
+        <param name="max_vertical_speed" value="$(arg max_vertical_speed)"/>
+        
+        <!-- Trajectory parameters -->
+        <param name="waypoint_mode" value="$(arg waypoint_mode)"/>
+        <param name="loop_trajectory" value="$(arg loop_trajectory)"/>
+        <param name="start_at_current_pose" value="$(arg start_at_current_pose)"/>
+        
+        <!-- Gate parameters -->
+        <param name="hover_altitude" value="$(arg hover_altitude)"/>
+        <param name="alt_tolerance" value="$(arg alt_tolerance)"/>
+        <param name="hover_stable_time" value="$(arg hover_stable_time)"/>
+        <param name="gate_on_altitude" value="$(arg gate_on_altitude)"/>
+        
+        <!-- Acceptance parameters -->
+        <param name="acceptance_radius_xy" value="$(arg acceptance_radius_xy)"/>
+        <param name="acceptance_alt_tol" value="$(arg acceptance_alt_tol)"/>
+        
+        <!-- Circle parameters -->
+        <param name="circle_center_n" value="0.0"/>
+        <param name="circle_center_e" value="0.0"/>
+        <param name="circle_radius" value="$(arg circle_radius)"/>
+        <param name="circle_altitude" value="$(arg circle_altitude)"/>
+        <param name="circle_points" value="$(arg circle_points)"/>
+        
+        <!-- Square parameters -->
+        <param name="square_center_n" value="0.0"/>
+        <param name="square_center_e" value="0.0"/>
+        <param name="square_size" value="$(arg square_size)"/>
+        <param name="square_altitude" value="$(arg square_altitude)"/>
+        <param name="square_points_per_side" value="$(arg square_points_per_side)"/>
+        <param name="square_constant_yaw" value="false"/>
+        
+        <!-- Helix parameters -->
+        <param name="helix_center_n" value="0.0"/>
+        <param name="helix_center_e" value="0.0"/>
+        <param name="helix_radius" value="$(arg helix_radius)"/>
+        <param name="helix_start_altitude" value="$(arg helix_start_altitude)"/>
+        <param name="helix_end_altitude" value="$(arg helix_end_altitude)"/>
+        <param name="helix_turns" value="$(arg helix_turns)"/>
+        <param name="helix_points" value="$(arg helix_points)"/>
+        
+        <!-- Diamond parameters -->
+        <param name="diamond_center_n" value="0.0"/>
+        <param name="diamond_center_e" value="0.0"/>
+        <param name="diamond_size" value="$(arg diamond_size)"/>
+        <param name="diamond_start_altitude" value="$(arg diamond_start_altitude)"/>
+        <param name="diamond_end_altitude" value="$(arg diamond_end_altitude)"/>
+        <param name="diamond_points_per_side" value="$(arg diamond_points_per_side)"/>
+    </node>
+
+</launch>

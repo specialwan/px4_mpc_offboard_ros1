@@ -7,7 +7,7 @@
 
     <!-- Mode & umum -->
     <param name="waypoint_mode"          value="helix" />
-    <param name="ref_speed"              value="1.5" />   <!-- bisa sedikit lebih pelan -->
+    <param name="ref_speed"              value="2.0" />   <!-- bisa sedikit lebih pelan -->
     <param name="loop_trajectory"        value="false" />
     <param name="start_at_current_pose"  value="true" />
 
@@ -23,14 +23,30 @@
     <param name="helix_radius"           value="7.5" />
     <!-- NED altitudes (negative = up): start at 5m, end at 15m -->
     <param name="helix_start_altitude"   value="-5.0" />   <!-- -5m NED = 5m above ground -->
-    <param name="helix_end_altitude"     value="-10.0" />  <!-- -15m NED = 15m above ground -->
-    <param name="helix_turns"            value="1.0" />
-    <param name="helix_points"           value="5.0" />
+    <param name="helix_end_altitude"     value="-15.0" />  <!-- -15m NED = 15m above ground -->
+    <param name="helix_turns"            value="3.0" />
+    <param name="helix_points"           value="350.0" />
 
     <!-- Helix juga murni trajectory tracking -->
-    <param name="waypoint_follow_mode"   value="true" />
+    <param name="waypoint_follow_mode"   value="false" />
     <param name="acceptance_radius_xy"   value="0.8" />
     <param name="acceptance_alt_tol"     value="0.5" />
     <param name="advance_on_reach"       value="false" />
+  </node>
+
+  <!-- ==== NODE 2: MPC TRAJECTORY FOLLOWER MANUAL ==== -->
+  <node name="mpc_trajectory_follower_manual"
+        pkg="mpc_offboard"
+        type="mpc_trajectory_follower_manual.py"
+        output="screen">
+  </node>
+
+  <!-- ==== NODE 3: DATA LOGGER MAVROS TRAJ ==== -->
+  <node name="data_logger_mavros_traj"
+        pkg="mpc_offboard"
+        type="data_logger_mavros_traj.py"
+        output="screen">
+    <!-- Auto stop saat trajectory selesai -->
+    <param name="auto_stop_on_finish" value="true"/>
   </node>
 </launch>

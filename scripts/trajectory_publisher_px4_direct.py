@@ -724,7 +724,7 @@ class Px4TrajectoryPublisherDirect(object):
         # NED: North=0°, East=90°
         # ENU: East=0°, North=90°
         # Jadi: yaw_enu = yaw_ned + 90°
-        yaw_enu = yaw_ref + np.pi / 2.0
+        yaw_enu = yaw_ref + np.pi / 2.0 
         
         # Yaw → quaternion
         qz = np.sin(yaw_enu / 2.0)
