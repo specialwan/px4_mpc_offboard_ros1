@@ -34,7 +34,7 @@ class MPCPositionController:
     3 control inputs: [ax, ay, az] (perintah akselerasi)
     """
 
-    def __init__(self, dt=0.1, Np=10, Nc=3):
+    def __init__(self, dt=0.1, Np=4, Nc=3):
         self.dt = dt
         self.Np = Np
         self.Nc = Nc
@@ -64,12 +64,12 @@ class MPCPositionController:
 
         # Cost matrices - SAFE MODE REAL FLIGHT
         self.Q = np.diag([
-            70.0, 70.0, 150.0,   # posisi
-            12.0, 12.0, 90.0     # kecepatan
+            50.0, 50.0, 120.0,   # posisi
+            6.0, 6.0, 60.0     # kecepatan
         ])
 
-        self.R = np.diag([0.06, 0.06, 0.06])     # penalti besarnya u
-        self.R_delta = np.diag([0.15, 0.15, 0.15])  # penalti perubahan u
+        self.R = np.diag([0.30, 0.30, 0.10])     # penalti besarnya u
+        self.R_delta = np.diag([0.12, 0.12, 0.06])  # penalti perubahan u
 
         self.u_prev = np.zeros(self.nu)
         self.a_max = 5.0  # m/s^2
