@@ -60,6 +60,7 @@
     <arg name="helix_end_altitude" default="-15.0"/>
     <arg name="helix_turns" default="3.0"/>
     <arg name="helix_points" default="120"/>
+    <arg name="helix_direction" default="ccw"/>  <!-- "cw" = clockwise, "ccw" = counter-clockwise -->
     
     <!-- Diamond parameters -->
     <arg name="diamond_size" default="7.5"/>
@@ -123,6 +124,7 @@
         <param name="helix_end_altitude" value="$(arg helix_end_altitude)"/>
         <param name="helix_turns" value="$(arg helix_turns)"/>
         <param name="helix_points" value="$(arg helix_points)"/>
+        <param name="helix_direction" value="$(arg helix_direction)"/>
         
         <!-- Diamond parameters -->
         <param name="diamond_center_n" value="0.0"/>

@@ -112,6 +112,7 @@ class LOSGuidanceTrajectoryPublisher(object):
         self.helix_end_altitude = rospy.get_param("~helix_end_altitude", -30.0)
         self.helix_turns = rospy.get_param("~helix_turns", 3.0)
         self.helix_points = int(rospy.get_param("~helix_points", 120))
+        self.helix_direction = rospy.get_param("~helix_direction", "ccw")  # "cw" = clockwise, "ccw" = counter-clockwise
 
         # Diamond ascending params
         self.diamond_center_n = rospy.get_param("~diamond_center_n", 0.0)
@@ -283,7 +284,8 @@ class LOSGuidanceTrajectoryPublisher(object):
                     start_altitude=0.0,
                     end_altitude=self.helix_end_altitude - self.helix_start_altitude,
                     turns=self.helix_turns,
-                    num_points=self.helix_points
+                    num_points=self.helix_points,
+                    direction=self.helix_direction
                 )
             elif self.waypoint_mode == "diamond":
                 path = self.generate_diamond_ascending_waypoints(
@@ -365,7 +367,8 @@ class LOSGuidanceTrajectoryPublisher(object):
                     start_altitude=self.helix_start_altitude,
                     end_altitude=self.helix_end_altitude,
                     turns=self.helix_turns,
-                    num_points=self.helix_points
+                    num_points=self.helix_points,
+                    direction=self.helix_direction
                 )
             elif self.waypoint_mode == "diamond":
                 path = self.generate_diamond_ascending_waypoints(
@@ -742,6 +745,14 @@ class LOSGuidanceTrajectoryPublisher(object):
         self.los_info_pub.publish(los_info_msg)
         self.desired_path_pub.publish(desired_msg)  # Publish desired path asli
 
+        # Publish trajectory status secara berkala
+        status_msg = String()
+        if self.trajectory_finished:
+            status_msg.data = "HOLD"  # Setelah FINISHED, drone hold di posisi akhir
+        else:
+            status_msg.data = self.mode  # "WAIT_ALT" atau "TRACK"
+        self.status_pub.publish(status_msg)
+
     # ======================================================================
     # TRAJECTORY GENERATORS (NED) – sama seperti sebelumnya
     # ======================================================================
@@ -815,20 +826,38 @@ class LOSGuidanceTrajectoryPublisher(object):
 
     def generate_helix_waypoints(self, center_n=0.0, center_e=0.0, radius=1.0,
                                  start_altitude=-10.0, end_altitude=-30.0,
-                                 turns=3.0, num_points=120, add_transition=True):
+                                 turns=3.0, num_points=120, add_transition=True,
+                                 direction="ccw"):
+        """
+        Generate helix waypoints with configurable rotation direction.
+        
+        Args:
+            center_n, center_e: Center position in NED frame
+            radius: Helix radius in meters
+            start_altitude, end_altitude: Start and end altitude (NED, negative = up)
+            turns: Number of helix turns
+            num_points: Number of waypoints to generate
+            add_transition: Add initial transition point at center
+            direction: Rotation direction - "cw" (clockwise) or "ccw" (counter-clockwise)
+        """
         waypoints = []
         if add_transition:
             waypoints.append([float(center_n), float(center_e),
                               float(start_altitude), 0.0])
 
+        # Direction multiplier: 1 for CCW (default), -1 for CW
+        dir_mult = -1.0 if direction.lower() == "cw" else 1.0
+        
         for i in range(num_points):
             t = float(i) / float(num_points - 1)
-            angle = 2.0 * np.pi * turns * t
+            angle = dir_mult * 2.0 * np.pi * turns * t
 
             n = center_n + radius * np.cos(angle)
             e = center_e + radius * np.sin(angle)
             d = start_altitude + t * (end_altitude - start_altitude)
-            yaw = angle + np.pi / 2.0
+            # Yaw tangent to circle: perpendicular to radius vector
+            # For CCW: yaw = angle + pi/2, For CW: yaw = angle - pi/2
+            yaw = angle + dir_mult * np.pi / 2.0
             waypoints.append([float(n), float(e), float(d), float(yaw)])
 
         return waypoints

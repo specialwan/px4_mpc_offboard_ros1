@@ -100,6 +100,7 @@ class DataLoggerLOSGuidance(object):
             # Error terhadap LOS reference (lookahead point)
             'error_los_x', 'error_los_y', 'error_los_z', 'error_los_mag',
             'waypoint_fresh',   # sekarang artinya "ref point fresh" (trajectory point baru < 0.5 s)
+            'trajectory_status',  # status: WAIT_ALT, TRACK, HOLD, FINISHED
         ]
 
         # state sekarang (ENU dari MAVROS)
@@ -134,6 +135,9 @@ class DataLoggerLOSGuidance(object):
         self.desired_ref_received = False
         self.los_ref_received = False
         self.trajectory_output_received = False
+
+        # trajectory status (WAIT_ALT, TRACK, HOLD, FINISHED)
+        self.current_trajectory_status = "UNKNOWN"
 
         # info controller (untuk sheet Summary)
         self.controller_type = 'MPC_LOS_GUIDANCE'
@@ -404,7 +408,22 @@ class DataLoggerLOSGuidance(object):
         ])
 
     def trajectory_status_callback(self, msg: String):
-        """Callback untuk status trajectory - auto stop saat selesai"""
+        """Callback untuk status trajectory - simpan status dan auto stop saat selesai"""
+        # Simpan status saat ini untuk logging
+        status_text = msg.data.upper()
+        
+        # Parse status dari pesan (bisa berupa "WAIT_ALT", "TRACK", "HOLD", "FINISHED", dll)
+        if "FINISHED" in status_text:
+            self.current_trajectory_status = "FINISHED"
+        elif "HOLD" in status_text:
+            self.current_trajectory_status = "HOLD"
+        elif "TRACK" in status_text:
+            self.current_trajectory_status = "TRACK"
+        elif "WAIT" in status_text or "ALT" in status_text:
+            self.current_trajectory_status = "WAIT_ALT"
+        else:
+            self.current_trajectory_status = status_text[:20]  # Truncate jika terlalu panjang
+        
         if msg.data == "FINISHED" and not self.trajectory_finished:
             self.trajectory_finished = True
             rospy.loginfo("\n" + "="*60)
@@ -558,6 +577,7 @@ class DataLoggerLOSGuidance(object):
             'error_los_mag': float(np.linalg.norm(los_error)),
 
             'waypoint_fresh': int(waypoint_fresh),
+            'trajectory_status': self.current_trajectory_status,
         }
 
         self.data_buffer.append(entry)
